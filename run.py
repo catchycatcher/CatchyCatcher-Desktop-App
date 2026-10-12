@@ -217,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
             banner(args.port)
             print("starting the API server...")
         else:
-            print("Starting CatchyCatcher...")
+            print("Starting Catchy Catcher...")
 
         server = subprocess.Popen([str(python), str(ROOT / "server.py")], env=env)
 
@@ -266,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
             if tunnel is not None and tunnel.poll() is not None:
                 print(
                     "\nthe share connection stopped, so there is no share code. "
-                    "See the message above; CatchyCatcher is still running "
+                    "See the message above; Catchy Catcher is still running "
                     "(press Ctrl+C to stop).",
                     file=sys.stderr,
                 )
