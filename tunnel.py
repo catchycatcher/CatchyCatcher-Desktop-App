@@ -74,10 +74,15 @@ except ImportError:
 
 
 # --- Cleanup Function ---
+#: Set from ``--verbose``; controls whether the noisy status lines are printed.
+VERBOSE = False
+
+
 def cleanup(signum, frame):
     """Gracefully kills tunnel subprocesses on script exit."""
     # Use the safer string definition from above
-    print("\n" + _TUNNEL_CLOSE_MSG)
+    if VERBOSE:
+        print("\n" + _TUNNEL_CLOSE_MSG)
     # Use Gradio's list of active tunnels
     # Make a copy because tunnel.kill() might modify the list
     tunnels_to_kill = list(CURRENT_TUNNELS)
@@ -100,6 +105,8 @@ def cleanup(signum, frame):
 
 # --- Main Execution ---
 def main():
+    global VERBOSE
+
     if not GRADIO_AVAILABLE:
         sys.exit(1)
 
@@ -148,10 +155,16 @@ def main():
         action="store_true",
         help="Suppress non-error messages.",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print the full tunnel details (share url, expiry, diagnostics).",
+    )
 
     args = parser.parse_args()
+    VERBOSE = args.verbose
 
-    if not args.quiet:
+    if VERBOSE and not args.quiet:
         print(
             f"Attempting to create share link for local app running at http://{args.host}:{args.port}..."
         )
@@ -177,13 +190,26 @@ def main():
             (args.share_server_protocol,) + parsed_url[1:]
         )
 
-        print("-" * 80)
-        print(_SHARE_LINK_DISPLAY_MSG.format(share_url))
-        print(_SHARE_CODE_DISPLAY_MSG.format(share_code(share_url)))
-        if not args.quiet:
-            print(_SHARE_LINK_MSG)
-        print("-" * 80)
-        print("Press Ctrl+C to stop the tunnel.")
+        code = share_code(share_url)
+
+        if VERBOSE:
+            print("-" * 80)
+            print(_SHARE_LINK_DISPLAY_MSG.format(share_url))
+            print(_SHARE_CODE_DISPLAY_MSG.format(code))
+            if not args.quiet:
+                print(_SHARE_LINK_MSG)
+            print("-" * 80)
+            print("Press Ctrl+C to stop the tunnel.")
+        else:
+            # Default: only the one thing the user actually needs.
+            print()
+            print("=" * 58)
+            print("        YOUR SHARE CODE")
+            print()
+            print(f"        {code}")
+            print()
+            print("=" * 58)
+            print()
 
         # Keep the script running to maintain the tunnel
         while True:

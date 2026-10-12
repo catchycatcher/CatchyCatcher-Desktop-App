@@ -41,6 +41,8 @@ Configuration is via environment variables:
 ``CATCHYCATCHER_PORT``         Bind port (default ``8000``).
 ``CATCHYCATCHER_UPLOAD_DIR``   Session storage root (default ``./sessions``).
 ``CATCHYCATCHER_CORS_ORIGINS`` Comma-separated origins, or ``*`` (default).
+``CATCHYCATCHER_LOG_LEVEL``    Uvicorn log level (default ``info``; ``run.py``
+                               uses ``warning`` unless ``--verbose``).
 ============================== ==================================================
 """
 
@@ -399,6 +401,9 @@ def main() -> None:
         "server:app",
         host=os.environ.get("CATCHYCATCHER_HOST", "0.0.0.0"),
         port=int(os.environ.get("CATCHYCATCHER_PORT", "8000")),
+        # run.py drops this to "warning" so a normal start is quiet; set it back
+        # to "info" (or pass --verbose) to see requests and startup diagnostics.
+        log_level=os.environ.get("CATCHYCATCHER_LOG_LEVEL", "info"),
     )
 
 

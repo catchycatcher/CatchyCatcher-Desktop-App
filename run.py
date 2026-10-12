@@ -6,9 +6,15 @@ a Gradio share tunnel (``tunnel.py``) so the static web frontend can reach it
 from anywhere. The tunnel prints the base62 share code to paste into the
 frontend.
 
+By default the output is kept short and user focused: the share code is the
+loudest thing on screen and nothing else is shown that the user does not need.
+Pass ``--verbose`` for the full picture (bind addresses, API/docs urls, the
+public tunnel url, uvicorn logs and startup diagnostics).
+
     python run.py               # server + public share tunnel
     python run.py --no-tunnel   # server only, reachable on the LAN
     python run.py --port 9000
+    python run.py --verbose     # show all startup details
 
 The project's ``.venv`` is used automatically, so there is no need to activate
 it first. If it does not exist yet, ``run.py`` runs ``setup_env.py`` for you
@@ -164,6 +170,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Skip the Gradio share tunnel (LAN access only).",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show full startup details (API urls, tunnel url, diagnostics).",
+    )
     return parser.parse_args(argv)
 
 
@@ -179,6 +190,7 @@ def banner(port: int) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    verbose = args.verbose
 
     # Line-buffer our status lines so they interleave correctly with the child
     # processes (Python block-buffers pipes; children do not).
@@ -195,47 +207,73 @@ def main(argv: list[str] | None = None) -> int:
     env = os.environ.copy()
     env["CATCHYCATCHER_HOST"] = args.host
     env["CATCHYCATCHER_PORT"] = str(args.port)
-
-    banner(args.port)
+    # Keep the server quiet unless the user asked to see everything.
+    env["CATCHYCATCHER_LOG_LEVEL"] = "info" if verbose else "warning"
 
     server: subprocess.Popen | None = None
     tunnel: subprocess.Popen | None = None
     try:
-        print("starting the API server...")
+        if verbose:
+            banner(args.port)
+            print("starting the API server...")
+        else:
+            print("Starting CatchyCatcher...")
+
         server = subprocess.Popen([str(python), str(ROOT / "server.py")], env=env)
 
-        if wait_for_health(args.port):
-            print("server is ready.")
-        elif server.poll() is not None:
-            print("server exited during startup.", file=sys.stderr)
+        healthy = wait_for_health(args.port)
+        if server.poll() is not None:
+            print("the server stopped during startup.", file=sys.stderr)
             return server.returncode or 1
-        else:
-            print("server is slow to start; check the output above for errors.", file=sys.stderr)
+        if verbose and healthy:
+            print("server is ready.")
+        elif not healthy:
+            print(
+                "the server is slow to start; check the output above for errors.",
+                file=sys.stderr,
+            )
 
         if args.no_tunnel:
-            print(f"\nno tunnel: reach the API at http://<this-machine>:{args.port}")
-            print("press Ctrl+C to stop.\n")
+            if verbose:
+                print(f"\nno tunnel: reach the API at http://<this-machine>:{args.port}")
+                print("press Ctrl+C to stop.\n")
+            else:
+                print("Public sharing is off; press Ctrl+C to stop.")
         else:
-            print("\nopening a share tunnel...")
-            print("paste the share code it prints into the frontend to connect.\n")
-            tunnel = subprocess.Popen(
-                [str(python), str(ROOT / "tunnel.py"), str(args.port), "--host", "127.0.0.1"],
-                env=env,
-            )
+            if verbose:
+                print("\nopening a share tunnel...")
+                print("paste the share code it prints into the frontend to connect.\n")
+            else:
+                print(f"\nHave {FRONTEND_URL} open, then enter the share code below.\n")
+            command = [
+                str(python),
+                str(ROOT / "tunnel.py"),
+                str(args.port),
+                "--host",
+                "127.0.0.1",
+            ]
+            if verbose:
+                command.append("--verbose")
+            tunnel = subprocess.Popen(command, env=env)
 
         while True:
             if server.poll() is not None:
-                print(f"\nAPI server exited with code {server.returncode}.", file=sys.stderr)
+                print(
+                    f"\nthe server stopped (exit code {server.returncode}).",
+                    file=sys.stderr,
+                )
                 return server.returncode or 0
             if tunnel is not None and tunnel.poll() is not None:
                 print(
-                    "\nshare tunnel stopped; the API server is still running on the LAN.",
+                    "\nthe share connection stopped, so there is no share code. "
+                    "See the message above; CatchyCatcher is still running "
+                    "(press Ctrl+C to stop).",
                     file=sys.stderr,
                 )
                 tunnel = None
             time.sleep(0.5)
     except KeyboardInterrupt:
-        print("\nshutting down...")
+        print("\nStopped.")
         return 0
     finally:
         stop(tunnel)

@@ -118,6 +118,25 @@ waits for `/health`, opens a Gradio share tunnel and prints a base62 **share
 code**. Paste that code into the frontend
 (https://catchycatcher.github.io) to connect.
 
+The normal output is deliberately short and user focused — the share code is the
+only thing on screen:
+
+```
+Starting CatchyCatcher...
+
+Have https://catchycatcher.github.io open, then enter the share code below.
+
+==========================================================
+        YOUR SHARE CODE
+
+        zz4k1q
+
+==========================================================
+```
+
+Pass `--verbose` to get the full startup detail instead (bind address, docs,
+public tunnel url, expiry notice and uvicorn logs):
+
 ```
 ================================================================
   Catchy Catcher processing server
@@ -138,6 +157,7 @@ Useful flags:
 | `--no-tunnel` | Skip the share tunnel; reach the API on the LAN only. |
 | `--port 9000` | Listen on a different port. |
 | `--host 127.0.0.1` | Bind to a specific interface. |
+| `--verbose` | Show all startup details (API/tunnel urls, diagnostics, logs). |
 
 The share tunnel uses [`gradio`](https://gradio.app) and is included in
 `requirements.txt`. It is pinned below 6 (`gradio<6`) on purpose: Gradio 6
@@ -164,6 +184,7 @@ Open `http://<desktop-ip>:8000/docs` for interactive Swagger UI.
 | `CATCHYCATCHER_PORT` | `8000` | Bind port. |
 | `CATCHYCATCHER_UPLOAD_DIR` | `./sessions` | Session storage root. |
 | `CATCHYCATCHER_CORS_ORIGINS` | `*` | Comma-separated allowed origins, or `*`. |
+| `CATCHYCATCHER_LOG_LEVEL` | `info` | Uvicorn log level (`run.py` sets `warning` unless `--verbose`). |
 
 Because the frontend is hosted statically (GitHub Pages / `localhost:5173`),
 requests are cross-origin. Lock this down in production, e.g.
