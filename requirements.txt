@@ -1,0 +1,31 @@
+# Catchy Catcher processing server dependencies.
+#
+# 1. Install the CUDA build of PyTorch first (target: NVIDIA RTX 4060):
+#
+#      pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+#
+#    On a CPU-only machine the same packages install from PyPI, but processing
+#    will be dramatically slower.
+#
+# 2. Then install everything below:
+#
+#      pip install -r requirements.txt
+#
+# `ffmpeg` must also be on PATH (see README.md).
+
+# Stem separation
+demucs
+
+# Transcription + forced alignment
+whisperx
+
+# Tempo detection
+librosa
+
+# Server
+fastapi
+uvicorn
+python-multipart
+
+# Numerics (torch also depends on numpy, but the pipeline imports it directly)
+numpy

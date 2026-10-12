@@ -1,0 +1,2 @@
+# Output of running pipeline.py against ../example.m4a lands here:
+#   python -c "from pipeline import process_song_session as p; p('example.m4a', 'example_output')"

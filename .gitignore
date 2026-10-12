@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Gradio tunnel scratch
+.gradio/
+
+# Pipeline I/O and model caches
+sessions/
+output/
+*.m4a
+*.wav
+
+# The reference example is committed so it can be run on the GPU desktop.
+!example.m4a
+
+# Model downloads (Demucs / WhisperX weights)
+.cache/
+models/
