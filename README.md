@@ -195,6 +195,7 @@ requests are cross-origin. Lock this down in production, e.g.
 ```
 sessions/
   <session_id>/
+    session.json         # display name, created_at
     takes/
       <take_id>/
         input.m4a        # the uploaded take
@@ -203,6 +204,10 @@ sessions/
         vocals.m4a
         background.m4a
 ```
+
+A session's `id` is its folder name (URL-safe and stable); its **display name**
+is free-form and lives in `session.json`. Sessions created before that file
+existed simply fall back to showing the id.
 
 `session_id` and `take_id` are sanitised to a single safe path segment, so
 `../../etc` cannot escape the root.
@@ -249,9 +254,11 @@ headers.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | `{"status": "ok", "device": "cuda"}` |
-| `GET` | `/sessions` | List session ids. |
-| `POST` | `/sessions/{session_id}` | Create an empty session folder ahead of recording. Idempotent (`created: false` if it already exists). |
-| `GET` | `/sessions/{session_id}` | Manifest: every take in order with status. |
+| `GET` | `/sessions` | List sessions as `{"id", "name"}` objects, ordered by id. |
+| `POST` | `/sessions/{session_id}` | Create an empty session folder ahead of recording. Idempotent (`created: false` if it already exists). Optional `?name=` sets the display name (kept on re-post when omitted). |
+| `PATCH` | `/sessions/{session_id}` | Rename a session (`?name=…`); takes are untouched. |
+| `DELETE` | `/sessions/{session_id}` | Delete a session and every take inside it. |
+| `GET` | `/sessions/{session_id}` | Manifest: the session `name`, then every take in order with status. |
 | `GET` | `/sessions/{session_id}/takes/{take_id}` | One take's metadata + result. |
 | `GET` | `/sessions/{session_id}/takes/{take_id}/audio/{stem}` | Stream `vocals` or `background` (`audio/mp4`). |
 | `DELETE` | `/sessions/{session_id}/takes/{take_id}` | Delete a take and its files. |

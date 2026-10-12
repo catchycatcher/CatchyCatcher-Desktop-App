@@ -19,11 +19,16 @@ Endpoints
     from ``SYSTEM_INSTRUCTIONS.md``. Optional ``index`` and ``silence_threshold``
     query parameters.
 ``GET    /sessions``
-    List known session ids.
+    List stored sessions as ``{"id", "name"}`` objects, ordered by id.
 ``POST   /sessions/{session_id}``
-    Create an empty session folder ahead of recording the first take.
+    Create an empty session folder ahead of recording the first take. Optional
+    ``name`` query parameter for the display name.
+``PATCH  /sessions/{session_id}``
+    Rename a session (``name`` query parameter); takes are untouched.
+``DELETE /sessions/{session_id}``
+    Delete a session and every take inside it.
 ``GET    /sessions/{session_id}``
-    Session manifest: every take in order, with its status and metadata.
+    Session manifest: the name, then every take in order with its status.
 ``GET    /sessions/{session_id}/takes/{take_id}``
     One take's metadata and (when finished) its result.
 ``GET    /sessions/{session_id}/takes/{take_id}/audio/{stem}``
@@ -154,6 +159,37 @@ def _next_index(session_id: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Session metadata
+# ---------------------------------------------------------------------------
+#
+# A session's id is its folder name (URL-safe, stable, never shown as the
+# primary label) while its display name is free-form and lives in
+# ``session.json``. Older sessions predate that file, so every reader falls
+# back to the id.
+
+
+def _session_meta_path(session_id: str) -> Path:
+    return _session_dir(session_id) / "session.json"
+
+
+def _clean_name(name: str | None, fallback: str) -> str:
+    """Collapse whitespace and cap length, falling back when empty."""
+    cleaned = " ".join((name or "").split())
+    return cleaned[:120] or fallback
+
+
+def session_name(session_id: str) -> str:
+    """Display name for a session, or its sanitised id when none is stored."""
+    sid = sanitize_id(session_id)
+    meta = _read_json(_session_meta_path(sid))
+    if isinstance(meta, dict):
+        name = meta.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return sid
+
+
+# ---------------------------------------------------------------------------
 # Take processing
 # ---------------------------------------------------------------------------
 
@@ -248,6 +284,8 @@ def root() -> dict[str, Any]:
             "POST /sessions/{session_id}/takes/{take_id}",
             "GET /sessions",
             "POST /sessions/{session_id}",
+            "PATCH /sessions/{session_id}",
+            "DELETE /sessions/{session_id}",
             "GET /sessions/{session_id}",
             "GET /sessions/{session_id}/takes/{take_id}",
             "GET /sessions/{session_id}/takes/{take_id}/audio/{stem}",
@@ -288,33 +326,97 @@ def create_take(
 
 @app.get("/sessions")
 def list_sessions() -> dict[str, Any]:
-    """List the ids of sessions stored on this server."""
-    sessions = (
-        sorted(p.name for p in SESSIONS_DIR.iterdir() if p.is_dir())
-        if SESSIONS_DIR.is_dir()
-        else []
-    )
+    """List stored sessions as ``{id, name}`` objects, ordered by id."""
+    sessions: list[dict[str, str]] = []
+    if SESSIONS_DIR.is_dir():
+        for path in SESSIONS_DIR.iterdir():
+            if path.is_dir():
+                sessions.append({"id": path.name, "name": session_name(path.name)})
+    sessions.sort(key=lambda item: item["id"])
     return {"sessions": sessions}
 
 
 @app.post("/sessions/{session_id}")
-def create_session(session_id: str) -> dict[str, Any]:
+def create_session(
+    session_id: str,
+    name: str | None = Query(
+        default=None,
+        description="Display name for the session. Defaults to its id.",
+    ),
+) -> dict[str, Any]:
     """Create an empty session folder so the client can record takes into it.
 
-    Idempotent: posting an id that already exists leaves it untouched and
-    reports ``created: false``. This lets the client "prepare" a session before
-    the first take is uploaded (takes would create the folder implicitly too).
+    Idempotent: posting an id that already exists leaves its takes untouched and
+    reports ``created: false``. The display ``name`` is stored in
+    ``session.json``; when omitted an existing name is kept (or the id is used).
     """
     sid = sanitize_id(session_id)
     session_dir = _session_dir(sid)
     created = not session_dir.is_dir()
     (session_dir / "takes").mkdir(parents=True, exist_ok=True)
-    return {"session_id": sid, "created": created, "created_at": _now()}
+
+    meta_path = _session_meta_path(sid)
+    existing = _read_json(meta_path)
+    if not isinstance(existing, dict):
+        existing = {}
+    prior = existing.get("name")
+    prior = prior if isinstance(prior, str) and prior.strip() else sid
+
+    display = _clean_name(name, prior)
+    created_at = existing.get("created_at") or _now()
+    _write_json(
+        meta_path,
+        {"session_id": sid, "name": display, "created_at": created_at},
+    )
+    return {
+        "session_id": sid,
+        "name": display,
+        "created": created,
+        "created_at": created_at,
+    }
+
+
+@app.patch("/sessions/{session_id}")
+def rename_session(
+    session_id: str,
+    name: str = Query(..., min_length=1, description="New display name."),
+) -> dict[str, Any]:
+    """Rename a session's display name; its takes and files are untouched."""
+    sid = sanitize_id(session_id)
+    if not _session_dir(sid).is_dir():
+        raise HTTPException(status_code=404, detail=f"Unknown session {sid!r}.")
+
+    meta_path = _session_meta_path(sid)
+    existing = _read_json(meta_path)
+    if not isinstance(existing, dict):
+        existing = {}
+
+    display = _clean_name(name, session_name(sid))
+    _write_json(
+        meta_path,
+        {
+            "session_id": sid,
+            "name": display,
+            "created_at": existing.get("created_at") or _now(),
+        },
+    )
+    return {"session_id": sid, "name": display}
+
+
+@app.delete("/sessions/{session_id}")
+def delete_session(session_id: str) -> dict[str, Any]:
+    """Delete a session and every take inside it."""
+    sid = sanitize_id(session_id)
+    session_dir = _session_dir(sid)
+    if not session_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Unknown session {sid!r}.")
+    shutil.rmtree(session_dir)
+    return {"deleted": True, "session_id": sid}
 
 
 @app.get("/sessions/{session_id}")
 def get_session(session_id: str) -> dict[str, Any]:
-    """Return every take in the session, ordered by index."""
+    """Return a session's name and every take in it, ordered by index."""
     sid = sanitize_id(session_id)
     session_dir = _session_dir(sid)
     if not session_dir.is_dir():
@@ -331,7 +433,12 @@ def get_session(session_id: str) -> dict[str, Any]:
                 takes.append(meta)
 
     takes.sort(key=lambda m: (m.get("index") or 0, m.get("created_at") or ""))
-    return {"session_id": sid, "take_count": len(takes), "takes": takes}
+    return {
+        "session_id": sid,
+        "name": session_name(sid),
+        "take_count": len(takes),
+        "takes": takes,
+    }
 
 
 @app.get("/sessions/{session_id}/takes/{take_id}")

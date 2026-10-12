@@ -463,17 +463,71 @@ class ApiTests(unittest.TestCase):
         resp = self.client.post("/sessions/newsession")
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(resp.json()["session_id"], "newsession")
+        self.assertEqual(resp.json()["name"], "newsession")
         self.assertTrue(resp.json()["created"])
 
         session_dir = Path(self.temp_dir) / "newsession"
         self.assertTrue(session_dir.is_dir())
         self.assertTrue((session_dir / "takes").is_dir())
-        self.assertIn("newsession", self.client.get("/sessions").json()["sessions"])
+        listed = self.client.get("/sessions").json()["sessions"]
+        self.assertIn("newsession", [s["id"] for s in listed])
 
         # Posting again leaves the folder alone and reports it already existed.
         again = self.client.post("/sessions/newsession")
         self.assertEqual(again.status_code, 200)
         self.assertFalse(again.json()["created"])
+
+    def test_create_session_stores_the_display_name(self):
+        resp = self.client.post(
+            "/sessions/abc123", params={"name": "Lazy Horse (10/12/2026)"}
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["name"], "Lazy Horse (10/12/2026)")
+
+        # The id stays a safe path segment; the pretty name lives in the manifest.
+        self.assertEqual(
+            self.client.get("/sessions/abc123").json()["name"],
+            "Lazy Horse (10/12/2026)",
+        )
+        listed = self.client.get("/sessions").json()["sessions"]
+        self.assertEqual(
+            listed, [{"id": "abc123", "name": "Lazy Horse (10/12/2026)"}]
+        )
+
+    def test_create_session_keeps_existing_name_when_name_omitted(self):
+        self.client.post("/sessions/keepme", params={"name": "First Name"})
+        again = self.client.post("/sessions/keepme")
+        self.assertFalse(again.json()["created"])
+        self.assertEqual(again.json()["name"], "First Name")
+
+    def test_rename_session(self):
+        self.client.post("/sessions/renameme", params={"name": "Old Name"})
+        resp = self.client.patch(
+            "/sessions/renameme", params={"name": "New Name"}
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json(), {"session_id": "renameme", "name": "New Name"})
+        self.assertEqual(self.client.get("/sessions/renameme").json()["name"], "New Name")
+
+        missing = self.client.patch("/sessions/nope", params={"name": "x"})
+        self.assertEqual(missing.status_code, 404)
+
+    def test_delete_session_removes_folder_and_takes(self):
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            self.client.post(
+                "/sessions/gone/takes/t", files={"file": ("t.m4a", b"x", "audio/mp4")}
+            )
+        self.assertTrue((Path(self.temp_dir) / "gone" / "takes" / "t").is_dir())
+
+        resp = self.client.delete("/sessions/gone")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json(), {"deleted": True, "session_id": "gone"})
+        self.assertFalse((Path(self.temp_dir) / "gone").exists())
+        self.assertEqual(self.client.get("/sessions").json()["sessions"], [])
+
+        self.assertEqual(self.client.delete("/sessions/gone").status_code, 404)
 
     def test_create_session_sanitises_id(self):
         resp = self.client.post("/sessions/my%20song%21%21%20take%202")
