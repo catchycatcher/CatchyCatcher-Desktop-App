@@ -1,0 +1,2013 @@
+{
+  "vocals": "C:\\Users\\PolyPenguin\\Projects\\CatchyCatcher-Desktop-App\\example_output\\example\\takes\\take\\vocals.m4a",
+  "background": "C:\\Users\\PolyPenguin\\Projects\\CatchyCatcher-Desktop-App\\example_output\\example\\takes\\take\\background.m4a",
+  "lyrics": [
+    {
+      "bpm": 103.4,
+      "start time": 12.772,
+      "end time": 15.853,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.16
+        },
+        {
+          "word": "have",
+          "length": 0.3
+        },
+        {
+          "word": "that",
+          "length": 0.18
+        },
+        {
+          "word": "hole",
+          "length": 0.32
+        },
+        {
+          "word": "still,",
+          "length": 0.3
+        },
+        {
+          "word": "the",
+          "length": 0.12
+        },
+        {
+          "word": "one",
+          "length": 0.16
+        },
+        {
+          "word": "you",
+          "length": 0.2
+        },
+        {
+          "word": "can't",
+          "length": 0.341
+        },
+        {
+          "word": "fill",
+          "length": 0.36
+        }
+      ]
+    },
+    {
+      "bpm": 112.3,
+      "start time": 16.353,
+      "end time": 17.973,
+      "words": [
+        {
+          "word": "But",
+          "length": 0.22
+        },
+        {
+          "word": "I",
+          "length": 0.04
+        },
+        {
+          "word": "know",
+          "length": 0.34
+        },
+        {
+          "word": "you're",
+          "length": 0.18
+        },
+        {
+          "word": "trying",
+          "length": 0.52
+        }
+      ]
+    },
+    {
+      "bpm": 147.7,
+      "start time": 18.914,
+      "end time": 21.774,
+      "words": [
+        {
+          "word": "Find",
+          "length": 0.4
+        },
+        {
+          "word": "a",
+          "length": 0.02
+        },
+        {
+          "word": "lover,",
+          "length": 0.72
+        },
+        {
+          "word": "tell",
+          "length": 0.32
+        },
+        {
+          "word": "her",
+          "length": 0.24
+        },
+        {
+          "word": "you",
+          "length": 0.16
+        },
+        {
+          "word": "love",
+          "length": 0.32
+        },
+        {
+          "word": "her",
+          "length": 0.2
+        }
+      ]
+    },
+    {
+      "bpm": 80.7,
+      "start time": 22.515,
+      "end time": 23.875,
+      "words": [
+        {
+          "word": "But",
+          "length": 0.18
+        },
+        {
+          "word": "you're",
+          "length": 0.38
+        },
+        {
+          "word": "just",
+          "length": 0.2
+        },
+        {
+          "word": "lying",
+          "length": 0.36
+        }
+      ]
+    },
+    {
+      "bpm": 156.6,
+      "start time": 24.575,
+      "end time": 25.536,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.22
+        },
+        {
+          "word": "smile,",
+          "length": 0.681
+        }
+      ]
+    },
+    {
+      "bpm": 152.0,
+      "start time": 25.996,
+      "end time": 26.976,
+      "words": [
+        {
+          "word": "you",
+          "length": 0.2
+        },
+        {
+          "word": "smile,",
+          "length": 0.7
+        }
+      ]
+    },
+    {
+      "bpm": 110.0,
+      "start time": 27.456,
+      "end time": 29.977,
+      "words": [
+        {
+          "word": "you",
+          "length": 0.2
+        },
+        {
+          "word": "smile,",
+          "length": 0.6
+        },
+        {
+          "word": "live",
+          "length": 0.301
+        },
+        {
+          "word": "from",
+          "length": 0.16
+        },
+        {
+          "word": "masquerade",
+          "length": 0.88
+        }
+      ]
+    },
+    {
+      "bpm": 103.4,
+      "start time": 36.065,
+      "end time": 38.327,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.2
+        },
+        {
+          "word": "sit",
+          "length": 0.28
+        },
+        {
+          "word": "here,",
+          "length": 0.32
+        },
+        {
+          "word": "you",
+          "length": 0.12
+        },
+        {
+          "word": "sit",
+          "length": 0.3
+        },
+        {
+          "word": "here,",
+          "length": 0.32
+        }
+      ]
+    },
+    {
+      "bpm": 123.0,
+      "start time": 38.847,
+      "end time": 41.349,
+      "words": [
+        {
+          "word": "you",
+          "length": 0.2
+        },
+        {
+          "word": "sit",
+          "length": 0.301
+        },
+        {
+          "word": "here,",
+          "length": 0.26
+        },
+        {
+          "word": "soaking",
+          "length": 0.601
+        },
+        {
+          "word": "in",
+          "length": 0.14
+        },
+        {
+          "word": "the",
+          "length": 0.1
+        },
+        {
+          "word": "pain.",
+          "length": 0.38
+        }
+      ]
+    },
+    {
+      "bpm": 156.6,
+      "start time": 47.594,
+      "end time": 50.396,
+      "words": [
+        {
+          "word": "Hide",
+          "length": 0.36
+        },
+        {
+          "word": "your",
+          "length": 0.221
+        },
+        {
+          "word": "hurt",
+          "length": 0.18
+        },
+        {
+          "word": "and",
+          "length": 0.14
+        },
+        {
+          "word": "feed",
+          "length": 0.34
+        },
+        {
+          "word": "your",
+          "length": 0.221
+        },
+        {
+          "word": "burdens.",
+          "length": 0.74
+        }
+      ]
+    },
+    {
+      "bpm": 94.0,
+      "start time": 50.937,
+      "end time": 52.518,
+      "words": [
+        {
+          "word": "No",
+          "length": 0.14
+        },
+        {
+          "word": "one",
+          "length": 0.1
+        },
+        {
+          "word": "hears",
+          "length": 0.38
+        },
+        {
+          "word": "you",
+          "length": 0.16
+        },
+        {
+          "word": "crying.",
+          "length": 0.561
+        }
+      ]
+    },
+    {
+      "bpm": 117.5,
+      "start time": 53.339,
+      "end time": 58.022,
+      "words": [
+        {
+          "word": "Lose",
+          "length": 0.28
+        },
+        {
+          "word": "your",
+          "length": 0.16
+        },
+        {
+          "word": "family,",
+          "length": 0.62
+        },
+        {
+          "word": "try",
+          "length": 0.301
+        },
+        {
+          "word": "to",
+          "length": 0.32
+        },
+        {
+          "word": "act",
+          "length": 0.1
+        },
+        {
+          "word": "manly.",
+          "length": 0.541
+        },
+        {
+          "word": "Too",
+          "length": 0.14
+        },
+        {
+          "word": "many",
+          "length": 0.3
+        },
+        {
+          "word": "loved",
+          "length": 0.321
+        },
+        {
+          "word": "ones",
+          "length": 0.12
+        },
+        {
+          "word": "dying.",
+          "length": 0.4
+        }
+      ]
+    },
+    {
+      "bpm": 152.0,
+      "start time": 58.623,
+      "end time": 59.563,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.2
+        },
+        {
+          "word": "smile,",
+          "length": 0.66
+        }
+      ]
+    },
+    {
+      "bpm": 147.7,
+      "start time": 60.044,
+      "end time": 61.004,
+      "words": [
+        {
+          "word": "you",
+          "length": 0.18
+        },
+        {
+          "word": "smile,",
+          "length": 0.66
+        }
+      ]
+    },
+    {
+      "bpm": 117.5,
+      "start time": 61.545,
+      "end time": 64.007,
+      "words": [
+        {
+          "word": "you",
+          "length": 0.18
+        },
+        {
+          "word": "smile",
+          "length": 0.621
+        },
+        {
+          "word": "and",
+          "length": 0.06
+        },
+        {
+          "word": "live",
+          "length": 0.32
+        },
+        {
+          "word": "a",
+          "length": 0.06
+        },
+        {
+          "word": "masquerade.",
+          "length": 0.861
+        }
+      ]
+    },
+    {
+      "bpm": 90.7,
+      "start time": 70.187,
+      "end time": 75.269,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.2
+        },
+        {
+          "word": "sit",
+          "length": 0.3
+        },
+        {
+          "word": "here,",
+          "length": 0.3
+        },
+        {
+          "word": "you",
+          "length": 0.161
+        },
+        {
+          "word": "sit",
+          "length": 0.3
+        },
+        {
+          "word": "here,",
+          "length": 0.32
+        },
+        {
+          "word": "you",
+          "length": 0.2
+        },
+        {
+          "word": "sit",
+          "length": 0.28
+        },
+        {
+          "word": "here",
+          "length": 0.24
+        },
+        {
+          "word": "soaking",
+          "length": 0.74
+        },
+        {
+          "word": "in",
+          "length": 0.061
+        },
+        {
+          "word": "the",
+          "length": 0.1
+        },
+        {
+          "word": "pain.",
+          "length": 0.42
+        }
+      ]
+    },
+    {
+      "bpm": 97.5,
+      "start time": 81.031,
+      "end time": 83.271,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.3
+        },
+        {
+          "word": "lose",
+          "length": 0.38
+        },
+        {
+          "word": "it,",
+          "length": 0.1
+        },
+        {
+          "word": "you",
+          "length": 0.24
+        },
+        {
+          "word": "lose",
+          "length": 0.44
+        },
+        {
+          "word": "it,",
+          "length": 0.1
+        }
+      ]
+    },
+    {
+      "bpm": 132.5,
+      "start time": 83.772,
+      "end time": 86.212,
+      "words": [
+        {
+          "word": "you",
+          "length": 0.2
+        },
+        {
+          "word": "lose",
+          "length": 0.34
+        },
+        {
+          "word": "it,",
+          "length": 0.1
+        },
+        {
+          "word": "start",
+          "length": 0.52
+        },
+        {
+          "word": "going",
+          "length": 0.5
+        },
+        {
+          "word": "insane.",
+          "length": 0.5
+        }
+      ]
+    },
+    {
+      "bpm": 123.0,
+      "start time": 87.653,
+      "end time": 89.754,
+      "words": [
+        {
+          "word": "Have",
+          "length": 0.28
+        },
+        {
+          "word": "you",
+          "length": 0.14
+        },
+        {
+          "word": "gone",
+          "length": 0.48
+        },
+        {
+          "word": "insane?",
+          "length": 1.001
+        }
+      ]
+    },
+    {
+      "bpm": 139.7,
+      "start time": 92.534,
+      "end time": 94.535,
+      "words": [
+        {
+          "word": "Tell",
+          "length": 0.341
+        },
+        {
+          "word": "me",
+          "length": 0.78
+        },
+        {
+          "word": "would",
+          "length": 0.72
+        },
+        {
+          "word": "you",
+          "length": 0.06
+        }
+      ]
+    },
+    {
+      "bpm": 161.5,
+      "start time": 95.295,
+      "end time": 97.456,
+      "words": [
+        {
+          "word": "rather",
+          "length": 0.341
+        },
+        {
+          "word": "live",
+          "length": 0.08
+        },
+        {
+          "word": "forever",
+          "length": 0.52
+        },
+        {
+          "word": "or",
+          "length": 0.04
+        },
+        {
+          "word": "just",
+          "length": 0.3
+        },
+        {
+          "word": "die?",
+          "length": 0.44
+        }
+      ]
+    },
+    {
+      "bpm": 86.1,
+      "start time": 98.036,
+      "end time": 99.397,
+      "words": [
+        {
+          "word": "Tell",
+          "length": 0.34
+        },
+        {
+          "word": "me",
+          "length": 0.301
+        },
+        {
+          "word": "would",
+          "length": 0.22
+        },
+        {
+          "word": "you",
+          "length": 0.26
+        }
+      ]
+    },
+    {
+      "bpm": 110.0,
+      "start time": 100.649,
+      "end time": 102.751,
+      "words": [
+        {
+          "word": "Rather",
+          "length": 0.24
+        },
+        {
+          "word": "find",
+          "length": 0.201
+        },
+        {
+          "word": "the",
+          "length": 0.1
+        },
+        {
+          "word": "truth",
+          "length": 0.42
+        },
+        {
+          "word": "or",
+          "length": 0.101
+        },
+        {
+          "word": "live",
+          "length": 0.18
+        },
+        {
+          "word": "a",
+          "length": 0.36
+        },
+        {
+          "word": "lie",
+          "length": 0.06
+        }
+      ]
+    },
+    {
+      "bpm": 136.0,
+      "start time": 103.492,
+      "end time": 107.937,
+      "words": [
+        {
+          "word": "I",
+          "length": 0.14
+        },
+        {
+          "word": "know",
+          "length": 0.281
+        },
+        {
+          "word": "you",
+          "length": 0.22
+        },
+        {
+          "word": "so",
+          "length": 0.32
+        },
+        {
+          "word": "well",
+          "length": 0.641
+        },
+        {
+          "word": "and",
+          "length": 0.201
+        },
+        {
+          "word": "I",
+          "length": 0.06
+        },
+        {
+          "word": "know",
+          "length": 0.42
+        },
+        {
+          "word": "you",
+          "length": 0.18
+        },
+        {
+          "word": "need",
+          "length": 0.38
+        },
+        {
+          "word": "my",
+          "length": 0.26
+        },
+        {
+          "word": "help",
+          "length": 0.261
+        },
+        {
+          "word": "so",
+          "length": 0.26
+        }
+      ]
+    },
+    {
+      "bpm": 117.5,
+      "start time": 108.678,
+      "end time": 110.2,
+      "words": [
+        {
+          "word": "Tell",
+          "length": 0.3
+        },
+        {
+          "word": "me",
+          "length": 0.541
+        },
+        {
+          "word": "would",
+          "length": 0.16
+        },
+        {
+          "word": "you",
+          "length": 0.321
+        }
+      ]
+    },
+    {
+      "bpm": 129.2,
+      "start time": 111.301,
+      "end time": 113.323,
+      "words": [
+        {
+          "word": "rather",
+          "length": 0.32
+        },
+        {
+          "word": "live",
+          "length": 0.12
+        },
+        {
+          "word": "forever",
+          "length": 0.501
+        },
+        {
+          "word": "or",
+          "length": 0.04
+        },
+        {
+          "word": "die",
+          "length": 0.301
+        },
+        {
+          "word": "young?",
+          "length": 0.3
+        }
+      ]
+    },
+    {
+      "bpm": 126.0,
+      "start time": 116.727,
+      "end time": 118.829,
+      "words": [
+        {
+          "word": "Rather",
+          "length": 0.34
+        },
+        {
+          "word": "live",
+          "length": 0.08
+        },
+        {
+          "word": "forever",
+          "length": 0.501
+        },
+        {
+          "word": "or",
+          "length": 0.04
+        },
+        {
+          "word": "die",
+          "length": 0.3
+        },
+        {
+          "word": "young?",
+          "length": 0.441
+        }
+      ]
+    },
+    {
+      "bpm": 123.0,
+      "start time": 122.117,
+      "end time": 124.119,
+      "words": [
+        {
+          "word": "Rather",
+          "length": 0.32
+        },
+        {
+          "word": "live",
+          "length": 0.12
+        },
+        {
+          "word": "forever",
+          "length": 0.501
+        },
+        {
+          "word": "or",
+          "length": 0.08
+        },
+        {
+          "word": "die",
+          "length": 0.32
+        },
+        {
+          "word": "young.",
+          "length": 0.321
+        }
+      ]
+    },
+    {
+      "bpm": 103.4,
+      "start time": 124.659,
+      "end time": 127.522,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.14
+        },
+        {
+          "word": "tell",
+          "length": 0.18
+        },
+        {
+          "word": "the",
+          "length": 0.101
+        },
+        {
+          "word": "same",
+          "length": 0.26
+        },
+        {
+          "word": "lies",
+          "length": 0.28
+        },
+        {
+          "word": "you've",
+          "length": 0.22
+        },
+        {
+          "word": "been",
+          "length": 0.16
+        },
+        {
+          "word": "saying",
+          "length": 0.32
+        },
+        {
+          "word": "your",
+          "length": 0.18
+        },
+        {
+          "word": "whole",
+          "length": 0.24
+        },
+        {
+          "word": "life.",
+          "length": 0.301
+        }
+      ]
+    },
+    {
+      "bpm": 117.5,
+      "start time": 128.002,
+      "end time": 133.186,
+      "words": [
+        {
+          "word": "The",
+          "length": 0.1
+        },
+        {
+          "word": "ones",
+          "length": 0.24
+        },
+        {
+          "word": "everyone",
+          "length": 0.481
+        },
+        {
+          "word": "keeps",
+          "length": 0.28
+        },
+        {
+          "word": "buying.",
+          "length": 0.401
+        },
+        {
+          "word": "You",
+          "length": 0.08
+        },
+        {
+          "word": "think",
+          "length": 0.2
+        },
+        {
+          "word": "no",
+          "length": 0.22
+        },
+        {
+          "word": "one",
+          "length": 0.12
+        },
+        {
+          "word": "knows",
+          "length": 0.34
+        },
+        {
+          "word": "you,",
+          "length": 0.2
+        },
+        {
+          "word": "you",
+          "length": 0.16
+        },
+        {
+          "word": "help",
+          "length": 0.22
+        },
+        {
+          "word": "that",
+          "length": 0.201
+        },
+        {
+          "word": "come",
+          "length": 0.28
+        },
+        {
+          "word": "true.",
+          "length": 0.34
+        }
+      ]
+    },
+    {
+      "bpm": 112.3,
+      "start time": 133.887,
+      "end time": 135.328,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.12
+        },
+        {
+          "word": "can't",
+          "length": 0.4
+        },
+        {
+          "word": "keep",
+          "length": 0.201
+        },
+        {
+          "word": "hiding.",
+          "length": 0.5
+        }
+      ]
+    },
+    {
+      "bpm": 147.7,
+      "start time": 135.888,
+      "end time": 136.889,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.201
+        },
+        {
+          "word": "smile.",
+          "length": 0.7
+        }
+      ]
+    },
+    {
+      "bpm": 166.7,
+      "start time": 137.31,
+      "end time": 138.17,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.18
+        },
+        {
+          "word": "smile.",
+          "length": 0.6
+        }
+      ]
+    },
+    {
+      "bpm": 123.0,
+      "start time": 138.671,
+      "end time": 141.133,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.18
+        },
+        {
+          "word": "smile.",
+          "length": 0.58
+        },
+        {
+          "word": "Live",
+          "length": 0.3
+        },
+        {
+          "word": "a",
+          "length": 0.08
+        },
+        {
+          "word": "masquerade.",
+          "length": 0.901
+        }
+      ]
+    },
+    {
+      "bpm": 97.5,
+      "start time": 146.917,
+      "end time": 152.021,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.2
+        },
+        {
+          "word": "sit",
+          "length": 0.3
+        },
+        {
+          "word": "here,",
+          "length": 0.341
+        },
+        {
+          "word": "you",
+          "length": 0.18
+        },
+        {
+          "word": "sit",
+          "length": 0.32
+        },
+        {
+          "word": "here,",
+          "length": 0.301
+        },
+        {
+          "word": "you",
+          "length": 0.2
+        },
+        {
+          "word": "sit",
+          "length": 0.28
+        },
+        {
+          "word": "here",
+          "length": 0.24
+        },
+        {
+          "word": "soaking",
+          "length": 0.58
+        },
+        {
+          "word": "in",
+          "length": 0.14
+        },
+        {
+          "word": "the",
+          "length": 0.12
+        },
+        {
+          "word": "pain.",
+          "length": 0.401
+        }
+      ]
+    },
+    {
+      "bpm": 95.7,
+      "start time": 157.684,
+      "end time": 159.846,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.341
+        },
+        {
+          "word": "lose",
+          "length": 0.38
+        },
+        {
+          "word": "it,",
+          "length": 0.08
+        },
+        {
+          "word": "you",
+          "length": 0.24
+        },
+        {
+          "word": "lose",
+          "length": 0.3
+        },
+        {
+          "word": "it,",
+          "length": 0.08
+        }
+      ]
+    },
+    {
+      "bpm": 129.2,
+      "start time": 160.326,
+      "end time": 162.728,
+      "words": [
+        {
+          "word": "you",
+          "length": 0.2
+        },
+        {
+          "word": "lose",
+          "length": 0.341
+        },
+        {
+          "word": "it",
+          "length": 0.08
+        },
+        {
+          "word": "and",
+          "length": 0.06
+        },
+        {
+          "word": "start",
+          "length": 0.34
+        },
+        {
+          "word": "going",
+          "length": 0.48
+        },
+        {
+          "word": "insane.",
+          "length": 0.501
+        }
+      ]
+    },
+    {
+      "bpm": 101.3,
+      "start time": 164.129,
+      "end time": 166.05,
+      "words": [
+        {
+          "word": "Have",
+          "length": 0.28
+        },
+        {
+          "word": "you",
+          "length": 0.12
+        },
+        {
+          "word": "gone",
+          "length": 0.36
+        },
+        {
+          "word": "insane?",
+          "length": 0.941
+        }
+      ]
+    },
+    {
+      "bpm": 83.4,
+      "start time": 168.932,
+      "end time": 170.673,
+      "words": [
+        {
+          "word": "Tell",
+          "length": 0.34
+        },
+        {
+          "word": "me",
+          "length": 0.28
+        },
+        {
+          "word": "would",
+          "length": 0.34
+        },
+        {
+          "word": "you",
+          "length": 0.62
+        }
+      ]
+    },
+    {
+      "bpm": 120.2,
+      "start time": 171.554,
+      "end time": 173.715,
+      "words": [
+        {
+          "word": "rather",
+          "length": 0.32
+        },
+        {
+          "word": "live",
+          "length": 0.1
+        },
+        {
+          "word": "forever",
+          "length": 0.5
+        },
+        {
+          "word": "or",
+          "length": 0.041
+        },
+        {
+          "word": "just",
+          "length": 0.24
+        },
+        {
+          "word": "die?",
+          "length": 0.46
+        }
+      ]
+    },
+    {
+      "bpm": 94.0,
+      "start time": 174.236,
+      "end time": 175.516,
+      "words": [
+        {
+          "word": "Tell",
+          "length": 0.32
+        },
+        {
+          "word": "me",
+          "length": 0.24
+        },
+        {
+          "word": "would",
+          "length": 0.28
+        },
+        {
+          "word": "you",
+          "length": 0.24
+        }
+      ]
+    },
+    {
+      "bpm": 120.2,
+      "start time": 176.84,
+      "end time": 178.942,
+      "words": [
+        {
+          "word": "Rather",
+          "length": 0.26
+        },
+        {
+          "word": "find",
+          "length": 0.201
+        },
+        {
+          "word": "the",
+          "length": 0.1
+        },
+        {
+          "word": "truth",
+          "length": 0.42
+        },
+        {
+          "word": "or",
+          "length": 0.081
+        },
+        {
+          "word": "live",
+          "length": 0.18
+        },
+        {
+          "word": "a",
+          "length": 0.02
+        },
+        {
+          "word": "lie.",
+          "length": 0.36
+        }
+      ]
+    },
+    {
+      "bpm": 95.7,
+      "start time": 179.763,
+      "end time": 184.168,
+      "words": [
+        {
+          "word": "I",
+          "length": 0.1
+        },
+        {
+          "word": "know",
+          "length": 0.301
+        },
+        {
+          "word": "you",
+          "length": 0.18
+        },
+        {
+          "word": "so",
+          "length": 0.28
+        },
+        {
+          "word": "well",
+          "length": 0.641
+        },
+        {
+          "word": "and",
+          "length": 0.12
+        },
+        {
+          "word": "I",
+          "length": 0.06
+        },
+        {
+          "word": "know",
+          "length": 0.301
+        },
+        {
+          "word": "you",
+          "length": 0.22
+        },
+        {
+          "word": "need",
+          "length": 0.501
+        },
+        {
+          "word": "my",
+          "length": 0.26
+        },
+        {
+          "word": "help.",
+          "length": 0.3
+        },
+        {
+          "word": "So",
+          "length": 0.301
+        }
+      ]
+    },
+    {
+      "bpm": 120.2,
+      "start time": 184.808,
+      "end time": 186.41,
+      "words": [
+        {
+          "word": "tell",
+          "length": 0.321
+        },
+        {
+          "word": "me",
+          "length": 0.16
+        },
+        {
+          "word": "would",
+          "length": 0.32
+        },
+        {
+          "word": "you",
+          "length": 0.501
+        }
+      ]
+    },
+    {
+      "bpm": 132.5,
+      "start time": 187.451,
+      "end time": 189.413,
+      "words": [
+        {
+          "word": "rather",
+          "length": 0.34
+        },
+        {
+          "word": "live",
+          "length": 0.08
+        },
+        {
+          "word": "forever",
+          "length": 0.481
+        },
+        {
+          "word": "or",
+          "length": 0.04
+        },
+        {
+          "word": "die",
+          "length": 0.301
+        },
+        {
+          "word": "young?",
+          "length": 0.3
+        }
+      ]
+    },
+    {
+      "bpm": 129.2,
+      "start time": 192.656,
+      "end time": 197.121,
+      "words": [
+        {
+          "word": "Rather",
+          "length": 0.341
+        },
+        {
+          "word": "live",
+          "length": 0.08
+        },
+        {
+          "word": "forever",
+          "length": 0.56
+        },
+        {
+          "word": "or",
+          "length": 0.041
+        },
+        {
+          "word": "die",
+          "length": 0.721
+        },
+        {
+          "word": "young?",
+          "length": 2.322
+        }
+      ]
+    },
+    {
+      "bpm": 97.5,
+      "start time": 198.062,
+      "end time": 199.984,
+      "words": [
+        {
+          "word": "Rather",
+          "length": 0.38
+        },
+        {
+          "word": "live",
+          "length": 0.08
+        },
+        {
+          "word": "forever",
+          "length": 0.461
+        },
+        {
+          "word": "or",
+          "length": 0.26
+        },
+        {
+          "word": "die",
+          "length": 0.301
+        },
+        {
+          "word": "young?",
+          "length": 0.24
+        }
+      ]
+    },
+    {
+      "bpm": 103.4,
+      "start time": 209.672,
+      "end time": 212.473,
+      "words": [
+        {
+          "word": "You",
+          "length": 0.16
+        },
+        {
+          "word": "start",
+          "length": 0.36
+        },
+        {
+          "word": "to",
+          "length": 0.1
+        },
+        {
+          "word": "hate",
+          "length": 0.34
+        },
+        {
+          "word": "the",
+          "length": 0.08
+        },
+        {
+          "word": "words",
+          "length": 0.22
+        },
+        {
+          "word": "inside",
+          "length": 0.46
+        },
+        {
+          "word": "your",
+          "length": 0.181
+        },
+        {
+          "word": "head.",
+          "length": 0.58
+        }
+      ]
+    },
+    {
+      "bpm": 99.4,
+      "start time": 214.633,
+      "end time": 217.454,
+      "words": [
+        {
+          "word": "You're",
+          "length": 0.2
+        },
+        {
+          "word": "growing",
+          "length": 0.58
+        },
+        {
+          "word": "in",
+          "length": 0.2
+        },
+        {
+          "word": "self",
+          "length": 0.181
+        },
+        {
+          "word": "isolation.",
+          "length": 1.32
+        },
+        {
+          "word": "You",
+          "length": 0.06
+        }
+      ]
+    },
+    {
+      "bpm": 112.3,
+      "start time": 219.974,
+      "end time": 222.375,
+      "words": [
+        {
+          "word": "feel",
+          "length": 0.381
+        },
+        {
+          "word": "alone",
+          "length": 0.38
+        },
+        {
+          "word": "without",
+          "length": 0.3
+        },
+        {
+          "word": "a",
+          "length": 0.02
+        },
+        {
+          "word": "single",
+          "length": 0.54
+        },
+        {
+          "word": "friend.",
+          "length": 0.44
+        }
+      ]
+    },
+    {
+      "bpm": 147.7,
+      "start time": 226.756,
+      "end time": 228.657,
+      "words": [
+        {
+          "word": "But",
+          "length": 0.12
+        },
+        {
+          "word": "I",
+          "length": 0.1
+        },
+        {
+          "word": "hear",
+          "length": 0.74
+        },
+        {
+          "word": "you.",
+          "length": 0.701
+        }
+      ]
+    },
+    {
+      "bpm": 139.7,
+      "start time": 232.417,
+      "end time": 233.998,
+      "words": [
+        {
+          "word": "And",
+          "length": 0.08
+        },
+        {
+          "word": "I",
+          "length": 0.081
+        },
+        {
+          "word": "love",
+          "length": 0.66
+        },
+        {
+          "word": "you.",
+          "length": 0.58
+        }
+      ]
+    },
+    {
+      "bpm": 120.0,
+      "start time": 238.538,
+      "end time": 238.618,
+      "words": [
+        {
+          "word": "And",
+          "length": 0.08
+        }
+      ]
+    },
+    {
+      "bpm": 126.0,
+      "start time": 239.058,
+      "end time": 242.681,
+      "words": [
+        {
+          "word": "I",
+          "length": 0.14
+        },
+        {
+          "word": "feel",
+          "length": 1.04
+        },
+        {
+          "word": "your",
+          "length": 0.801
+        },
+        {
+          "word": "pain",
+          "length": 0.801
+        }
+      ]
+    },
+    {
+      "bpm": 120.0,
+      "start time": 245.983,
+      "end time": 246.463,
+      "words": [
+        {
+          "word": "So",
+          "length": 0.48
+        }
+      ]
+    },
+    {
+      "bpm": 136.0,
+      "start time": 247.584,
+      "end time": 249.865,
+      "words": [
+        {
+          "word": "tell",
+          "length": 0.42
+        },
+        {
+          "word": "me",
+          "length": 0.6
+        },
+        {
+          "word": "would",
+          "length": 0.92
+        },
+        {
+          "word": "you",
+          "length": 0.06
+        }
+      ]
+    },
+    {
+      "bpm": 139.7,
+      "start time": 250.866,
+      "end time": 253.387,
+      "words": [
+        {
+          "word": "rather",
+          "length": 0.34
+        },
+        {
+          "word": "live",
+          "length": 0.14
+        },
+        {
+          "word": "forever",
+          "length": 0.6
+        },
+        {
+          "word": "or",
+          "length": 0.04
+        },
+        {
+          "word": "just",
+          "length": 0.28
+        },
+        {
+          "word": "die?",
+          "length": 0.62
+        }
+      ]
+    },
+    {
+      "bpm": 161.5,
+      "start time": 253.888,
+      "end time": 255.709,
+      "words": [
+        {
+          "word": "Tell",
+          "length": 0.34
+        },
+        {
+          "word": "me",
+          "length": 0.46
+        },
+        {
+          "word": "would",
+          "length": 0.24
+        },
+        {
+          "word": "you",
+          "length": 0.421
+        },
+        {
+          "word": "rather",
+          "length": 0.12
+        }
+      ]
+    },
+    {
+      "bpm": 107.7,
+      "start time": 256.689,
+      "end time": 258.871,
+      "words": [
+        {
+          "word": "find",
+          "length": 0.581
+        },
+        {
+          "word": "the",
+          "length": 0.1
+        },
+        {
+          "word": "truth",
+          "length": 0.44
+        },
+        {
+          "word": "or",
+          "length": 0.08
+        },
+        {
+          "word": "live",
+          "length": 0.2
+        },
+        {
+          "word": "a",
+          "length": 0.1
+        },
+        {
+          "word": "lie?",
+          "length": 0.3
+        }
+      ]
+    },
+    {
+      "bpm": 114.8,
+      "start time": 259.751,
+      "end time": 264.354,
+      "words": [
+        {
+          "word": "I",
+          "length": 0.1
+        },
+        {
+          "word": "know",
+          "length": 0.301
+        },
+        {
+          "word": "you",
+          "length": 0.22
+        },
+        {
+          "word": "so",
+          "length": 0.3
+        },
+        {
+          "word": "well",
+          "length": 0.721
+        },
+        {
+          "word": "and",
+          "length": 0.12
+        },
+        {
+          "word": "I",
+          "length": 0.08
+        },
+        {
+          "word": "know",
+          "length": 0.28
+        },
+        {
+          "word": "you",
+          "length": 0.26
+        },
+        {
+          "word": "need",
+          "length": 0.481
+        },
+        {
+          "word": "my",
+          "length": 0.28
+        },
+        {
+          "word": "help",
+          "length": 0.3
+        },
+        {
+          "word": "So",
+          "length": 0.3
+        }
+      ]
+    },
+    {
+      "bpm": 117.5,
+      "start time": 265.055,
+      "end time": 266.436,
+      "words": [
+        {
+          "word": "tell",
+          "length": 0.32
+        },
+        {
+          "word": "me",
+          "length": 0.46
+        },
+        {
+          "word": "would",
+          "length": 0.24
+        },
+        {
+          "word": "you",
+          "length": 0.141
+        }
+      ]
+    },
+    {
+      "bpm": 139.7,
+      "start time": 267.779,
+      "end time": 269.82,
+      "words": [
+        {
+          "word": "Rather",
+          "length": 0.3
+        },
+        {
+          "word": "live",
+          "length": 0.14
+        },
+        {
+          "word": "forever",
+          "length": 0.521
+        },
+        {
+          "word": "or",
+          "length": 0.24
+        },
+        {
+          "word": "die",
+          "length": 0.3
+        },
+        {
+          "word": "young",
+          "length": 0.36
+        }
+      ]
+    },
+    {
+      "bpm": 126.0,
+      "start time": 273.203,
+      "end time": 277.785,
+      "words": [
+        {
+          "word": "Rather",
+          "length": 0.32
+        },
+        {
+          "word": "live",
+          "length": 0.18
+        },
+        {
+          "word": "forever",
+          "length": 0.52
+        },
+        {
+          "word": "or",
+          "length": 0.04
+        },
+        {
+          "word": "die",
+          "length": 0.321
+        },
+        {
+          "word": "young",
+          "length": 2.781
+        }
+      ]
+    },
+    {
+      "bpm": 139.7,
+      "start time": 278.786,
+      "end time": 280.007,
+      "words": [
+        {
+          "word": "Rather",
+          "length": 0.38
+        },
+        {
+          "word": "live",
+          "length": 0.16
+        },
+        {
+          "word": "forever",
+          "length": 0.54
+        },
+        {
+          "word": "or",
+          "length": 0.04
+        }
+      ]
+    },
+    {
+      "bpm": 147.7,
+      "start time": 280.447,
+      "end time": 281.228,
+      "words": [
+        {
+          "word": "die",
+          "length": 0.34
+        },
+        {
+          "word": "young",
+          "length": 0.361
+        }
+      ]
+    }
+  ]
+}
