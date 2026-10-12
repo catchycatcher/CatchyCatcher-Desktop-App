@@ -473,6 +473,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         download_nltk(py)
 
     smoke_test(py)
+
+    # Marker so run.py can skip the (idempotent) setup on later launches.
+    try:
+        (VENV / ".catchy_ready").write_text("ok\n", encoding="utf-8")
+    except OSError:
+        pass
+
     print_next_steps()
     return 0
 

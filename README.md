@@ -30,7 +30,7 @@ The full specification lives in [`../SYSTEM_INSTRUCTIONS.md`](../SYSTEM_INSTRUCT
 | --- | --- |
 | `pipeline.py` | `process_song_session()` — the whole DSP/AI pipeline for one take; returns the spec JSON. Caches models between takes. |
 | `server.py` | FastAPI app: sessions, takes, stem streaming, health. |
-| `run.py` | One-command launcher: starts the server and the share tunnel. |
+| `run.py` | One-command launcher: sets the environment up if needed, then starts the server and the share tunnel. |
 | `tunnel.py` | Gradio share tunnel, driven by `run.py`. |
 | `share_code.py` | Dependency-free base62 share-code maths (kept out of `tunnel.py` so it is testable). |
 | `test_pipeline.py` | 24 `unittest` tests: grouping, BPM fallback, id sanitising, share codes, the full flow (heavy stack stubbed) and the HTTP API. |
@@ -60,6 +60,10 @@ python setup_env.py
 
 Useful flags: `--cpu`, `--python 3.11`, `--torch-index <url>`, `--skip-ffmpeg`,
 `--skip-nltk`. The script is safe to re-run.
+
+You do not have to run this yourself: `python run.py` runs it automatically the
+first time (whenever `.venv` is missing), so a fresh checkout really only needs
+one command.
 
 > On Windows, open a **new** terminal after the first run so the freshly
 > installed `ffmpeg` shows up on `PATH`.
@@ -107,9 +111,11 @@ cd backend
 python run.py
 ```
 
-`run.py` uses the project's `.venv` automatically (no activation needed), starts
-the API server, waits for `/health`, then opens a Gradio share tunnel and prints
-a base62 **share code**. Paste that code into the frontend
+`run.py` uses the project's `.venv` automatically (no activation needed). If the
+venv is missing it first runs `setup_env.py` for you, so on a fresh checkout
+`python run.py` is the *only* command you need. It then starts the API server,
+waits for `/health`, opens a Gradio share tunnel and prints a base62 **share
+code**. Paste that code into the frontend
 (https://catchycatcher.github.io) to connect.
 
 ```
@@ -133,9 +139,11 @@ Useful flags:
 | `--port 9000` | Listen on a different port. |
 | `--host 127.0.0.1` | Bind to a specific interface. |
 
-The share tunnel uses [`gradio`](https://gradio.app). If it is not installed,
-`run.py` still starts the server and tells you the tunnel is unavailable — add it
-with `pip install gradio`.
+The share tunnel uses [`gradio`](https://gradio.app) and is included in
+`requirements.txt`. It is pinned below 6 (`gradio<6`) on purpose: Gradio 6
+requires `huggingface-hub>=2`, which breaks WhisperX/transformers. If it is not
+installed, `run.py` still starts the server and tells you the tunnel is
+unavailable — add it with `pip install "gradio<6"`.
 
 ### Manual start
 

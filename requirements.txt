@@ -27,5 +27,9 @@ fastapi
 uvicorn
 python-multipart
 
+# Share tunnel for the web frontend. Pinned below 6 on purpose: gradio 6
+# requires huggingface-hub>=2, which breaks whisperx/transformers.
+gradio<6
+
 # Numerics (torch also depends on numpy, but the pipeline imports it directly)
 numpy
