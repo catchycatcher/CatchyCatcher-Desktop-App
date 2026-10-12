@@ -490,9 +490,10 @@ class ApiTests(unittest.TestCase):
             "Lazy Horse (10/12/2026)",
         )
         listed = self.client.get("/sessions").json()["sessions"]
-        self.assertEqual(
-            listed, [{"id": "abc123", "name": "Lazy Horse (10/12/2026)"}]
-        )
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["id"], "abc123")
+        self.assertEqual(listed[0]["name"], "Lazy Horse (10/12/2026)")
+        self.assertTrue(listed[0]["updated_at"])
 
     def test_create_session_keeps_existing_name_when_name_omitted(self):
         self.client.post("/sessions/keepme", params={"name": "First Name"})
@@ -506,11 +507,40 @@ class ApiTests(unittest.TestCase):
             "/sessions/renameme", params={"name": "New Name"}
         )
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json(), {"session_id": "renameme", "name": "New Name"})
+        self.assertEqual(resp.json()["session_id"], "renameme")
+        self.assertEqual(resp.json()["name"], "New Name")
         self.assertEqual(self.client.get("/sessions/renameme").json()["name"], "New Name")
 
         missing = self.client.patch("/sessions/nope", params={"name": "x"})
         self.assertEqual(missing.status_code, 404)
+
+    def test_updated_at_is_reported_and_tracks_new_takes(self):
+        self.client.post("/sessions/active", params={"name": "Active"})
+        before = self.client.get("/sessions").json()["sessions"][0]
+        self.assertTrue(before["updated_at"])
+
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            self.client.post(
+                "/sessions/active/takes/t",
+                files={"file": ("t.m4a", b"x", "audio/mp4")},
+            )
+
+        after = self.client.get("/sessions").json()["sessions"][0]
+        self.assertIn("updated_at", after)
+        # ISO-8601 timestamps sort chronologically, even at second resolution.
+        self.assertGreaterEqual(after["updated_at"], before["updated_at"])
+
+    def test_delete_take_touches_the_session(self):
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            self.client.post(
+                "/sessions/touch/takes/t", files={"file": ("t.m4a", b"x", "audio/mp4")}
+            )
+        self.assertIn("updated_at", self.client.get("/sessions/touch").json())
+        self.assertEqual(self.client.delete("/sessions/touch/takes/t").status_code, 200)
 
     def test_delete_session_removes_folder_and_takes(self):
         with mock.patch.object(

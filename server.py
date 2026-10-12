@@ -19,7 +19,8 @@ Endpoints
     from ``SYSTEM_INSTRUCTIONS.md``. Optional ``index`` and ``silence_threshold``
     query parameters.
 ``GET    /sessions``
-    List stored sessions as ``{"id", "name"}`` objects, ordered by id.
+    List stored sessions as ``{"id", "name", "updated_at"}`` objects, ordered by
+    id.
 ``POST   /sessions/{session_id}``
     Create an empty session folder ahead of recording the first take. Optional
     ``name`` query parameter for the display name.
@@ -189,6 +190,60 @@ def session_name(session_id: str) -> str:
     return sid
 
 
+def _write_session_meta(
+    session_id: str,
+    *,
+    name: str | None = None,
+    created_at: str | None = None,
+    updated_at: str | None = None,
+) -> dict[str, str]:
+    """Merge-update ``session.json`` and return the record that was written.
+
+    Any field left as ``None`` keeps its previous value (or a sensible default),
+    so callers only have to pass what changed.
+    """
+    sid = sanitize_id(session_id)
+    existing = _read_json(_session_meta_path(sid))
+    if not isinstance(existing, dict):
+        existing = {}
+
+    prior_name = existing.get("name")
+    prior_name = prior_name if isinstance(prior_name, str) and prior_name.strip() else sid
+
+    now = _now()
+    meta = {
+        "session_id": sid,
+        "name": _clean_name(name, prior_name),
+        "created_at": created_at or existing.get("created_at") or now,
+        "updated_at": updated_at or now,
+    }
+    _write_json(_session_meta_path(sid), meta)
+    return meta
+
+
+def _touch_session(session_id: str) -> None:
+    """Bump a session's ``updated_at`` (its takes changed)."""
+    if _session_dir(session_id).is_dir():
+        _write_session_meta(session_id)
+
+
+def session_updated_at(session_id: str) -> str:
+    """Last-modified timestamp for a session, best-effort for old sessions."""
+    sid = sanitize_id(session_id)
+    meta = _read_json(_session_meta_path(sid))
+    if isinstance(meta, dict):
+        for key in ("updated_at", "created_at"):
+            value = meta.get(key)
+            if isinstance(value, str) and value:
+                return value
+    # Legacy session without metadata: fall back to the folder's own mtime.
+    try:
+        mtime = _session_dir(sid).stat().st_mtime
+    except OSError:
+        return ""
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(timespec="seconds")
+
+
 # ---------------------------------------------------------------------------
 # Take processing
 # ---------------------------------------------------------------------------
@@ -238,29 +293,33 @@ def _process_take(
     _write_json(meta_path, meta)
 
     try:
-        with PROCESS_LOCK:
-            result = pipeline.process_song_session(
-                str(input_path),
-                output_dir=str(take_dir),
-                silence_threshold=silence_threshold,
-            )
-    except RuntimeError as exc:
-        # Missing dependencies / missing input are server-side problems.
-        _record_failure(meta_path, meta, str(exc))
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 - surface the failure to the client
-        _record_failure(meta_path, meta, str(exc))
-        raise HTTPException(status_code=500, detail=f"Processing failed: {exc}") from exc
+        try:
+            with PROCESS_LOCK:
+                result = pipeline.process_song_session(
+                    str(input_path),
+                    output_dir=str(take_dir),
+                    silence_threshold=silence_threshold,
+                )
+        except RuntimeError as exc:
+            # Missing dependencies / missing input are server-side problems.
+            _record_failure(meta_path, meta, str(exc))
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - surface the failure to the client
+            _record_failure(meta_path, meta, str(exc))
+            raise HTTPException(status_code=500, detail=f"Processing failed: {exc}") from exc
 
-    _write_json(take_dir / "result.json", result)
-    meta["status"] = "done"
-    meta["finished_at"] = _now()
-    _write_json(meta_path, meta)
+        _write_json(take_dir / "result.json", result)
+        meta["status"] = "done"
+        meta["finished_at"] = _now()
+        _write_json(meta_path, meta)
 
-    response = JSONResponse(result)
-    response.headers["X-Session-Id"] = sid
-    response.headers["X-Take-Id"] = tid
-    return response
+        response = JSONResponse(result)
+        response.headers["X-Session-Id"] = sid
+        response.headers["X-Take-Id"] = tid
+        return response
+    finally:
+        # Adding (or finishing) a take modifies the session; record when.
+        _touch_session(sid)
 
 
 def _record_failure(meta_path: Path, meta: dict[str, Any], error: str) -> None:
@@ -326,12 +385,18 @@ def create_take(
 
 @app.get("/sessions")
 def list_sessions() -> dict[str, Any]:
-    """List stored sessions as ``{id, name}`` objects, ordered by id."""
+    """List stored sessions as ``{id, name, updated_at}``, ordered by id."""
     sessions: list[dict[str, str]] = []
     if SESSIONS_DIR.is_dir():
         for path in SESSIONS_DIR.iterdir():
             if path.is_dir():
-                sessions.append({"id": path.name, "name": session_name(path.name)})
+                sessions.append(
+                    {
+                        "id": path.name,
+                        "name": session_name(path.name),
+                        "updated_at": session_updated_at(path.name),
+                    }
+                )
     sessions.sort(key=lambda item: item["id"])
     return {"sessions": sessions}
 
@@ -355,24 +420,13 @@ def create_session(
     created = not session_dir.is_dir()
     (session_dir / "takes").mkdir(parents=True, exist_ok=True)
 
-    meta_path = _session_meta_path(sid)
-    existing = _read_json(meta_path)
-    if not isinstance(existing, dict):
-        existing = {}
-    prior = existing.get("name")
-    prior = prior if isinstance(prior, str) and prior.strip() else sid
-
-    display = _clean_name(name, prior)
-    created_at = existing.get("created_at") or _now()
-    _write_json(
-        meta_path,
-        {"session_id": sid, "name": display, "created_at": created_at},
-    )
+    meta = _write_session_meta(sid, name=name)
     return {
         "session_id": sid,
-        "name": display,
+        "name": meta["name"],
         "created": created,
-        "created_at": created_at,
+        "created_at": meta["created_at"],
+        "updated_at": meta["updated_at"],
     }
 
 
@@ -386,21 +440,8 @@ def rename_session(
     if not _session_dir(sid).is_dir():
         raise HTTPException(status_code=404, detail=f"Unknown session {sid!r}.")
 
-    meta_path = _session_meta_path(sid)
-    existing = _read_json(meta_path)
-    if not isinstance(existing, dict):
-        existing = {}
-
-    display = _clean_name(name, session_name(sid))
-    _write_json(
-        meta_path,
-        {
-            "session_id": sid,
-            "name": display,
-            "created_at": existing.get("created_at") or _now(),
-        },
-    )
-    return {"session_id": sid, "name": display}
+    meta = _write_session_meta(sid, name=name)
+    return {"session_id": sid, "name": meta["name"], "updated_at": meta["updated_at"]}
 
 
 @app.delete("/sessions/{session_id}")
@@ -436,6 +477,7 @@ def get_session(session_id: str) -> dict[str, Any]:
     return {
         "session_id": sid,
         "name": session_name(sid),
+        "updated_at": session_updated_at(sid),
         "take_count": len(takes),
         "takes": takes,
     }
@@ -472,6 +514,7 @@ def delete_take(session_id: str, take_id: str) -> dict[str, Any]:
     if not take_dir.is_dir():
         raise HTTPException(status_code=404, detail="Unknown take.")
     shutil.rmtree(take_dir)
+    _touch_session(session_id)
     return {"deleted": True, "session_id": sanitize_id(session_id), "take_id": sanitize_id(take_id)}
 
 

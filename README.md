@@ -122,7 +122,7 @@ The normal output is deliberately short and user focused — the share code is t
 only thing on screen:
 
 ```
-Starting CatchyCatcher...
+Starting Catchy Catcher...
 
 Have https://catchycatcher.github.io open, then enter the share code below.
 
@@ -195,7 +195,7 @@ requests are cross-origin. Lock this down in production, e.g.
 ```
 sessions/
   <session_id>/
-    session.json         # display name, created_at
+    session.json         # display name, created_at, updated_at
     takes/
       <take_id>/
         input.m4a        # the uploaded take
@@ -254,7 +254,7 @@ headers.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | `{"status": "ok", "device": "cuda"}` |
-| `GET` | `/sessions` | List sessions as `{"id", "name"}` objects, ordered by id. |
+| `GET` | `/sessions` | List sessions as `{"id", "name", "updated_at"}` objects, ordered by id. |
 | `POST` | `/sessions/{session_id}` | Create an empty session folder ahead of recording. Idempotent (`created: false` if it already exists). Optional `?name=` sets the display name (kept on re-post when omitted). |
 | `PATCH` | `/sessions/{session_id}` | Rename a session (`?name=…`); takes are untouched. |
 | `DELETE` | `/sessions/{session_id}` | Delete a session and every take inside it. |
