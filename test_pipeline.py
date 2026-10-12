@@ -69,6 +69,90 @@ class GroupWordsIntoLinesTests(unittest.TestCase):
         self.assertEqual(len(pipeline.group_words_into_lines(words, 0.4)), 1)
         self.assertEqual(len(pipeline.group_words_into_lines(words, 0.1)), 2)
 
+    def test_sentence_end_punctuation_splits_on_a_small_pause(self):
+        # 0.12s is well under the 0.4s threshold, but the full stop says the
+        # sentence is over.
+        words = [word("hello.", 0.0, 0.5), word("world", 0.62, 1.0)]
+        lines = pipeline.group_words_into_lines(words, silence_threshold=0.4)
+        self.assertEqual([[w["word"] for w in line] for line in lines], [["hello."], ["world"]])
+
+    def test_period_without_any_pause_stays_on_one_line(self):
+        # A '.' with no breath at all is not trusted (WhisperX slips them in).
+        words = [word("hello.", 0.0, 0.5), word("world", 0.5, 1.0)]
+        self.assertEqual(len(pipeline.group_words_into_lines(words, 0.4)), 1)
+
+    def test_comma_tips_a_moderate_pause_over_the_line(self):
+        # The 0.17s gap is only ~1.1x the surrounding 0.15s gaps. The combined
+        # score leaves it just short of a break — until the comma's weight is
+        # added, which pushes it over.
+        base = [
+            word("a", 0.0, 0.5),
+            word("hello,", 0.65, 1.15),
+            word("b", 1.32, 1.82),
+            word("c", 1.97, 2.47),
+            word("d", 2.62, 3.12),
+        ]
+        comma = pipeline.group_words_into_lines(base, silence_threshold=0.4)
+        self.assertEqual(len(comma), 2)
+
+        no_comma = [dict(w, word=w["word"].rstrip(",")) for w in base]
+        self.assertEqual(len(pipeline.group_words_into_lines(no_comma, silence_threshold=0.4)), 1)
+
+    def test_nearby_line_length_splits_a_long_unpunctuated_run(self):
+        # Two short (~0.85s) lines then a long run with only tiny gaps and no
+        # punctuation. The run is far longer than the lines around it, so the
+        # line-length signal should break it up even with no pause to do it.
+        words = [
+            word("a0", 0.00, 0.25),
+            word("a1", 0.30, 0.55),
+            word("a2", 0.60, 0.85),
+            word("b0", 1.45, 1.70),
+            word("b1", 1.75, 2.00),
+            word("b2", 2.05, 2.30),
+            word("c0", 2.90, 3.15),
+            word("c1", 3.20, 3.45),
+            word("c2", 3.50, 3.75),
+            word("c3", 3.80, 4.05),
+            word("c4", 4.10, 4.35),
+            word("c5", 4.40, 4.65),
+            word("c6", 4.70, 4.95),
+            word("c7", 5.00, 5.25),
+            word("c8", 5.30, 5.55),
+        ]
+        lines = pipeline.group_words_into_lines(words, silence_threshold=0.4)
+        texts = [[w["word"] for w in line] for line in lines]
+
+        # a0..a2 and b0..b2 are separate lines; the c-run is not one big line.
+        self.assertEqual(texts[:2], [["a0", "a1", "a2"], ["b0", "b1", "b2"]])
+        self.assertGreater(len(lines), 3)
+        c_lines = [line for line in texts if any(text.startswith("c") for text in line)]
+        self.assertGreater(len(c_lines), 1)
+
+    def test_relative_pause_splits_below_the_absolute_threshold(self):
+        # One 0.3s gap among 0.05s gaps is a phrase boundary even though it is
+        # under the 0.4s threshold.
+        words = [
+            word("a", 0.0, 0.2),
+            word("b", 0.25, 0.45),
+            word("c", 0.5, 0.7),
+            word("d", 1.0, 1.2),
+            word("e", 1.25, 1.45),
+            word("f", 1.5, 1.7),
+        ]
+        lines = pipeline.group_words_into_lines(words, silence_threshold=0.4)
+        self.assertEqual([[w["word"] for w in line] for line in lines], [["a", "b", "c"], ["d", "e", "f"]])
+
+    def test_uniform_small_gaps_stay_on_one_line(self):
+        words = [word(f"w{i}", i * 0.2, i * 0.2 + 0.15) for i in range(6)]  # 0.05s gaps
+        self.assertEqual(len(pipeline.group_words_into_lines(words, 0.4)), 1)
+
+    def test_line_cap_splits_a_long_run(self):
+        # No natural break, but the line would be 7 words: cap it at 3.
+        words = [word(f"w{i}", i * 0.2, i * 0.2 + 0.15) for i in range(7)]
+        lines = pipeline.group_words_into_lines(words, 0.4, max_line_words=3)
+        self.assertTrue(all(len(line) <= 3 for line in lines))
+        self.assertEqual([w["word"] for line in lines for w in line], [w["word"] for w in words])
+
 
 class EstimateLineBpmTests(unittest.TestCase):
     def test_none_slice_falls_back(self):

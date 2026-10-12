@@ -376,7 +376,7 @@ def create_take(
         default=pipeline.SILENCE_THRESHOLD,
         gt=0,
         le=5,
-        description="Seconds of pause that starts a new lyric line.",
+        description="Seconds of pause that always starts a new lyric line. Other signals (relative pauses, punctuation, nearby line length) are combined into the same line-break score.",
     ),
 ) -> JSONResponse:
     """Process one take. Blocks until the stems and lyric timeline are ready."""
@@ -525,7 +525,7 @@ def process_session_endpoint(
         default=pipeline.SILENCE_THRESHOLD,
         gt=0,
         le=5,
-        description="Seconds of pause that starts a new lyric line.",
+        description="Seconds of pause that always starts a new lyric line. Other signals (relative pauses, punctuation, nearby line length) are combined into the same line-break score.",
     ),
 ) -> JSONResponse:
     """Single-shot endpoint from the original spec.

@@ -28,13 +28,15 @@ Pipeline stages:
 
 1. Stem separation with Demucs (``htdemucs``) on CUDA when available.
 2. Precision transcription + forced phoneme alignment with WhisperX.
-3. Word grouping into lyric lines using a pause threshold.
+3. Word grouping into lyric lines from a combined break score: pause size,
+   relative pause, sentence/clause punctuation and nearby line length.
 4. Per-line BPM estimation with librosa.
 """
 
 from __future__ import annotations
 
 import os
+import statistics
 import subprocess
 import tempfile
 import threading
@@ -46,8 +48,54 @@ import numpy as np
 # Tunables (see "Implementation Guidelines" in SYSTEM_INSTRUCTIONS.md)
 # ---------------------------------------------------------------------------
 
-#: Pause in seconds between two words that starts a new lyric line.
+#: Pause in seconds between two words that *always* starts a new lyric line.
 SILENCE_THRESHOLD = 0.4
+
+# --- Line-grouping model (see ``group_words_into_lines``) ------------------
+#
+# Whether a boundary is a line break is a *score*, not a single condition. Each
+# signal contributes its own amount and they all add up; the line only breaks
+# when the total clears zero. This lets a comma tip an otherwise ordinary pause
+# over the line, and lets a long line be broken even without punctuation.
+#
+#   score = W_GAP   * (gap / silence_threshold)      # a real pause
+#         + W_REL   * (gap / local_median_gap - 1)   # long for this singer
+#         + W_PUNCT * punctuation_weight             # . ! ? vs , ; :
+#         + W_LEN   * (line_seconds / nearby - 1)    # long for nearby lines
+#         - BIAS
+#
+# ``group_words_into_lines`` runs twice: once to learn the typical line length,
+# then again with the nearby-line signal enabled.
+
+#: Weight of the absolute pause (``gap / silence_threshold``); 1.0 means a gap
+#: exactly at the threshold contributes that whole weight.
+GAP_WEIGHT = 1.0
+#: Weight of "this pause is long compared to the surrounding words".
+RELATIVE_GAP_WEIGHT = 0.8
+#: Weight of sentence/clause punctuation.
+PUNCTUATION_WEIGHT = 0.55
+#: Weight of "this line is long compared to nearby lines".
+LINE_LENGTH_WEIGHT = 0.9
+#: Subtracted from the total; the boundary breaks when the score is >= 0.
+BREAK_BIAS = 0.65
+#: Caps that keep individual terms from dominating the score.
+MAX_GAP_RATIO = 3.0
+MAX_RELATIVE_RATIO = 4.0
+
+#: Punctuation that very strongly suggests the line ends here.
+SENTENCE_END_PUNCTUATION = ".!?…"
+#: Punctuation that suggests a clause boundary (weaker than a full stop).
+CLAUSE_PUNCTUATION = ",;:"
+#: How many neighbouring gaps a gap is compared against.
+GAP_WINDOW = 3
+#: How many recently finished lines the nearby-length signal compares against.
+LINE_WINDOW = 4
+#: Hard ceilings; a line never grows past these.
+MAX_LINE_SECONDS = 14.0
+MAX_LINE_WORDS = 16
+#: Closers ignored when looking for a word's trailing punctuation.
+TRAILING_CLOSERS = "\"'”’)]}"
+
 
 #: Tempo prior handed to librosa when estimating a line's BPM.
 START_BPM = 110.0
@@ -106,30 +154,177 @@ def detect_device() -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def _trailing_punctuation(word: str) -> str:
+    """The word's final punctuation mark, ignoring quotes/brackets, or ``""``."""
+    text = str(word).strip()
+    while text and text[-1] in TRAILING_CLOSERS:
+        text = text[:-1]
+    if text and text[-1] in SENTENCE_END_PUNCTUATION + CLAUSE_PUNCTUATION:
+        return text[-1]
+    return ""
+
+
+def _punct_weight(word: str) -> float:
+    """How strongly a word's punctuation suggests the line ends: 1, 0.5 or 0."""
+    mark = _trailing_punctuation(word)
+    if not mark:
+        return 0.0
+    if mark in SENTENCE_END_PUNCTUATION:
+        return 1.0
+    if mark in CLAUSE_PUNCTUATION:
+        return 0.5
+    return 0.0
+
+
+def _word_gaps(words: list[dict[str, Any]]) -> list[float]:
+    """Non-negative pause between each consecutive pair of words."""
+    gaps: list[float] = []
+    for index in range(len(words) - 1):
+        gap = float(words[index + 1]["start"]) - float(words[index]["end"])
+        gaps.append(max(0.0, gap))
+    return gaps
+
+
+def _local_gap_scale(gaps: list[float], index: int, window: int = GAP_WINDOW) -> float:
+    """Median of the *other* nearby gaps (how fast this singer usually moves).
+
+    Returns 0.0 when there is no usable comparison, so the caller can treat the
+    relative term as neutral instead of penalising the boundary.
+    """
+    low = max(0, index - window)
+    high = min(len(gaps), index + window + 1)
+    neighbours = [gaps[j] for j in range(low, high) if j != index and gaps[j] > 0]
+    if not neighbours:
+        neighbours = [gap for gap in gaps if gap > 0]
+    if not neighbours:
+        return 0.0
+    return statistics.median(neighbours)
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _break_score(
+    words: list[dict[str, Any]],
+    gaps: list[float],
+    index: int,
+    line_start: int,
+    silence_threshold: float,
+    nearby_seconds: float | None,
+) -> float:
+    """Total likelihood (>= 0 means "break here") for the boundary at ``index``.
+
+    Every signal is folded in: the absolute pause, how the pause compares to the
+    singer's nearby gaps, punctuation, and how long the line has grown compared
+    to the lines around it.
+    """
+    gap = gaps[index]
+
+    x_gap = 0.0
+    if silence_threshold > 0:
+        x_gap = _clamp(gap / silence_threshold, 0.0, MAX_GAP_RATIO)
+
+    scale = _local_gap_scale(gaps, index)
+    x_relative = 0.0
+    if scale > 0:
+        x_relative = _clamp(gap / scale, 0.0, MAX_RELATIVE_RATIO) - 1.0
+
+    score = (
+        GAP_WEIGHT * x_gap
+        + RELATIVE_GAP_WEIGHT * x_relative
+        + PUNCTUATION_WEIGHT * _punct_weight(str(words[index].get("word", "")))
+    )
+
+    if nearby_seconds and nearby_seconds > 0:
+        line_seconds = float(words[index]["end"]) - float(words[line_start]["start"])
+        score += LINE_LENGTH_WEIGHT * max(0.0, line_seconds / nearby_seconds - 1.0)
+
+    return score - BREAK_BIAS
+
+
+def _segment_lines(
+    words: list[dict[str, Any]],
+    gaps: list[float],
+    silence_threshold: float,
+    nearby_seconds: float | None,
+    max_line_seconds: float,
+    max_line_words: int,
+) -> list[list[dict[str, Any]]]:
+    """Greedily cut ``words`` into lines, tracking recent line lengths."""
+    lines: list[list[dict[str, Any]]] = []
+    recent_lengths: list[float] = []
+    start = 0
+
+    for index in range(len(gaps)):
+        count = index - start + 1
+        seconds = float(words[index]["end"]) - float(words[start]["start"])
+        over_cap = count >= max_line_words or seconds >= max_line_seconds
+
+        # "Nearby lines" = the lines we just finished (they tend to be similar).
+        target = statistics.median(recent_lengths) if recent_lengths else nearby_seconds
+        score = _break_score(words, gaps, index, start, silence_threshold, target)
+
+        if over_cap or score >= 0.0:
+            lines.append(words[start : index + 1])
+            recent_lengths.append(float(words[index]["end"]) - float(words[start]["start"]))
+            if len(recent_lengths) > LINE_WINDOW:
+                recent_lengths.pop(0)
+            start = index + 1
+
+    lines.append(words[start:])
+    return lines
+
+
+def _median_line_seconds(lines: list[list[dict[str, Any]]]) -> float | None:
+    durations = [
+        float(line[-1]["end"]) - float(line[0]["start"]) for line in lines if line
+    ]
+    usable = [duration for duration in durations if duration > 0]
+    if not usable:
+        return None
+    return statistics.median(usable)
+
+
 def group_words_into_lines(
     words: Iterable[dict[str, Any]],
     silence_threshold: float = SILENCE_THRESHOLD,
+    *,
+    max_line_seconds: float = MAX_LINE_SECONDS,
+    max_line_words: int = MAX_LINE_WORDS,
 ) -> list[list[dict[str, Any]]]:
-    """Split aligned words into lines wherever the gap between words is large.
+    """Split aligned words into lyric lines from a weighted break score.
 
-    A new line starts when ``word["start"] - previous["end"] >= silence_threshold``.
+    Rather than any single trigger, every signal is combined into one score for
+    each word boundary — the size of the pause, how that pause compares to the
+    singer's surrounding gaps, whether the word ends a sentence or clause, and
+    whether the line has grown longer than the lines around it. The boundary
+    breaks when the combined score clears zero, so a comma or a full stop can
+    tip an otherwise ordinary pause into a break, and a long line can break with
+    no punctuation at all.
+
+    Two passes are used: the first learns the typical line length, the second
+    adds the nearby-line signal. Lines never exceed ``max_line_seconds`` /
+    ``max_line_words``.
+
     Pure Python and dependency-free so it can be unit tested without a GPU.
     """
     words = list(words)
     if not words:
         return []
+    if len(words) == 1:
+        return [words]
 
-    lines: list[list[dict[str, Any]]] = []
-    current: list[dict[str, Any]] = [words[0]]
+    gaps = _word_gaps(words)
 
-    for previous, word in zip(words, words[1:]):
-        if word["start"] - previous["end"] >= silence_threshold:
-            lines.append(current)
-            current = []
-        current.append(word)
+    first_pass = _segment_lines(
+        words, gaps, silence_threshold, None, max_line_seconds, max_line_words
+    )
+    nearby_seconds = _median_line_seconds(first_pass)
 
-    lines.append(current)
-    return lines
+    return _segment_lines(
+        words, gaps, silence_threshold, nearby_seconds, max_line_seconds, max_line_words
+    )
 
 
 def _librosa_tempo_fn(librosa: Any) -> Callable[..., Any]:

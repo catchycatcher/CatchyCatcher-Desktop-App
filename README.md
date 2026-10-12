@@ -319,7 +319,11 @@ librosa required.
   fight over the 8 GB of VRAM.
 - **Alignment:** WhisperX forced alignment gives millisecond word boundaries;
   words missing `start`/`end` are skipped.
-- **Line grouping:** tune `silence_threshold` if phrases group too tightly or
-  sparsely.
+- **Line grouping:** every word boundary gets a combined break *score* — pause
+  size, how the pause compares to the singer's nearby gaps, sentence/clause
+  punctuation, and how long the line has grown next to the lines around it —
+  and breaks when the total clears a threshold, so commas/full stops can tip an
+  ordinary pause and over-long lines break without one. A two-pass run learns
+  the typical line length first. Tune `silence_threshold` for overall tightness.
 - **BPM:** estimated per line from the vocal stem (`start_bpm=110`). Lines
   shorter than `0.5s` (or that fail analysis) fall back to `120.0` bpm.
