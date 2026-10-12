@@ -32,9 +32,37 @@ The full specification lives in [`../SYSTEM_INSTRUCTIONS.md`](../SYSTEM_INSTRUCT
 | `server.py` | FastAPI app: sessions, takes, stem streaming, health. |
 | `test_pipeline.py` | 20 `unittest` tests: grouping, BPM fallback, id sanitising, the full flow (heavy stack stubbed) and the HTTP API. |
 | `tunnel.py` | Existing Gradio-style share-tunnel helper (unrelated to the API). |
+| `setup_env.py` | One-command cross-platform installer (uv + Python + ffmpeg + deps). |
 | `requirements.txt` | Python dependencies. |
 
 ## Setup
+
+### One-command setup (Windows, macOS, Linux)
+
+With any Python 3.8+ on `PATH`:
+
+```sh
+python setup_env.py
+```
+
+`setup_env.py` bootstraps the whole environment:
+
+- installs [`uv`](https://docs.astral.sh/uv/) (and a managed Python 3.12 if the
+  system interpreter is unusable);
+- installs `ffmpeg` with the platform package manager (`winget` / `brew` /
+  `apt` / `dnf` / `pacman` / `zypper` / `apk`);
+- creates `.venv` and installs the pinned PyTorch build — **CUDA** when an
+  NVIDIA GPU is detected, **CPU** otherwise, and **MPS** on macOS;
+- installs the rest of `requirements.txt`;
+- downloads the NLTK tokenizer data WhisperX alignment needs.
+
+Useful flags: `--cpu`, `--python 3.11`, `--torch-index <url>`, `--skip-ffmpeg`,
+`--skip-nltk`. The script is safe to re-run.
+
+> On Windows, open a **new** terminal after the first run so the freshly
+> installed `ffmpeg` shows up on `PATH`.
+
+### Manual setup
 
 `ffmpeg` must be on `PATH` (verify with `ffmpeg -version`).
 
@@ -44,11 +72,18 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 # CUDA build of PyTorch first (RTX 4060):
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
+  --index-url https://download.pytorch.org/whl/cu128
 
 # Everything else:
 pip install -r requirements.txt
 ```
+
+> **Keep PyTorch on the 2.8.0 line.** From torchaudio 2.9 on, `load`/`save`
+> hard-require TorchCodec, which needs FFmpeg *shared* libraries (v4-7) that
+> many systems do not have; the 2.8.x torchaudio still uses the
+> soundfile/ffmpeg fallback `pipeline.py` relies on. `setup_env.py` pins this
+> automatically.
 
 > CPU-only machine? Install torch from the CPU index instead — the CUDA wheels
 > are ~2.5 GB and useless without an NVIDIA GPU:
