@@ -30,8 +30,10 @@ The full specification lives in [`../SYSTEM_INSTRUCTIONS.md`](../SYSTEM_INSTRUCT
 | --- | --- |
 | `pipeline.py` | `process_song_session()` — the whole DSP/AI pipeline for one take; returns the spec JSON. Caches models between takes. |
 | `server.py` | FastAPI app: sessions, takes, stem streaming, health. |
-| `test_pipeline.py` | 20 `unittest` tests: grouping, BPM fallback, id sanitising, the full flow (heavy stack stubbed) and the HTTP API. |
-| `tunnel.py` | Existing Gradio-style share-tunnel helper (unrelated to the API). |
+| `run.py` | One-command launcher: starts the server and the share tunnel. |
+| `tunnel.py` | Gradio share tunnel, driven by `run.py`. |
+| `share_code.py` | Dependency-free base62 share-code maths (kept out of `tunnel.py` so it is testable). |
+| `test_pipeline.py` | 24 `unittest` tests: grouping, BPM fallback, id sanitising, share codes, the full flow (heavy stack stubbed) and the HTTP API. |
 | `setup_env.py` | One-command cross-platform installer (uv + Python + ffmpeg + deps). |
 | `requirements.txt` | Python dependencies. |
 
@@ -97,6 +99,45 @@ Model weights (Demucs `htdemucs`, WhisperX `medium` + alignment) download on
 first use and are cached under `~/.cache`.
 
 ## Run
+
+### One-command start (recommended)
+
+```sh
+cd backend
+python run.py
+```
+
+`run.py` uses the project's `.venv` automatically (no activation needed), starts
+the API server, waits for `/health`, then opens a Gradio share tunnel and prints
+a base62 **share code**. Paste that code into the frontend
+(https://catchycatcher.github.io) to connect.
+
+```
+================================================================
+  Catchy Catcher processing server
+================================================================
+  API       http://127.0.0.1:8000
+  Docs      http://127.0.0.1:8000/docs
+  Frontend  https://catchycatcher.github.io
+================================================================
+...
+Running on public URL: https://<hex>.gradio.live
+Share code (base-62): <code>
+```
+
+Useful flags:
+
+| Flag | Meaning |
+| --- | --- |
+| `--no-tunnel` | Skip the share tunnel; reach the API on the LAN only. |
+| `--port 9000` | Listen on a different port. |
+| `--host 127.0.0.1` | Bind to a specific interface. |
+
+The share tunnel uses [`gradio`](https://gradio.app). If it is not installed,
+`run.py` still starts the server and tells you the tunnel is unavailable — add it
+with `pip install gradio`.
+
+### Manual start
 
 ```sh
 # from backend/, with the venv active
@@ -180,6 +221,7 @@ headers.
 | --- | --- | --- |
 | `GET` | `/health` | `{"status": "ok", "device": "cuda"}` |
 | `GET` | `/sessions` | List session ids. |
+| `POST` | `/sessions/{session_id}` | Create an empty session folder ahead of recording. Idempotent (`created: false` if it already exists). |
 | `GET` | `/sessions/{session_id}` | Manifest: every take in order with status. |
 | `GET` | `/sessions/{session_id}/takes/{take_id}` | One take's metadata + result. |
 | `GET` | `/sessions/{session_id}/takes/{take_id}/audio/{stem}` | Stream `vocals` or `background` (`audio/mp4`). |
@@ -189,6 +231,9 @@ headers.
 ### Example
 
 ```sh
+# prepare an empty session folder before recording
+curl -X POST "http://<desktop-ip>:8000/sessions/song1"
+
 # send take 3 of a session called "song1"
 curl -X POST "http://<desktop-ip>:8000/sessions/song1/takes/3" \
   -F "file=@take3.m4a" -o take3.json -D headers.txt

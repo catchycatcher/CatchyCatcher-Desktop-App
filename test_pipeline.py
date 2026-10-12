@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 import pipeline
 import server
+import share_code
 from server import sanitize_id
 
 
@@ -112,6 +113,31 @@ class SanitizeIdTests(unittest.TestCase):
 
     def test_empty_falls_back(self):
         self.assertEqual(sanitize_id("!!!./"), "session")
+
+
+class ShareCodeTests(unittest.TestCase):
+    """The tunnel's share code must decode with the frontend's base62 maths."""
+
+    # The decoder the frontend uses (frontend/src/lib/base62.ts).
+    FRONTEND_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+    def frontend_decode(self, code: str) -> str:
+        value = 0
+        for char in code:
+            value = value * 62 + self.FRONTEND_ALPHABET.index(char)
+        return format(value, "x")
+
+    def test_known_examples(self):
+        # Straight from frontend/DEVNOTES.md: hex `f03` -> `zz`, hex `56596884` -> `1a2b3c`.
+        self.assertEqual(share_code.share_code("https://f03.gradio.live"), "zz")
+        self.assertEqual(share_code.share_code("https://56596884.gradio.live"), "1a2b3c")
+
+    def test_round_trips_hex_labels(self):
+        for label in ("1", "f03", "56596884", "07ff8706ab", "abcdef0123456789"):
+            code = share_code.share_code(f"https://{label}.gradio.live")
+            # Leading zeros carry no value, exactly like the frontend decoder.
+            expected = label.lower().lstrip("0") or "0"
+            self.assertEqual(self.frontend_decode(code), expected, label)
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +458,28 @@ class ApiTests(unittest.TestCase):
         meta = self.client.get("/sessions/e/takes/t").json()["meta"]
         self.assertEqual(meta["status"], "error")
         self.assertIn("torch", meta["error"])
+
+    def test_create_session_makes_folder_and_is_idempotent(self):
+        resp = self.client.post("/sessions/newsession")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["session_id"], "newsession")
+        self.assertTrue(resp.json()["created"])
+
+        session_dir = Path(self.temp_dir) / "newsession"
+        self.assertTrue(session_dir.is_dir())
+        self.assertTrue((session_dir / "takes").is_dir())
+        self.assertIn("newsession", self.client.get("/sessions").json()["sessions"])
+
+        # Posting again leaves the folder alone and reports it already existed.
+        again = self.client.post("/sessions/newsession")
+        self.assertEqual(again.status_code, 200)
+        self.assertFalse(again.json()["created"])
+
+    def test_create_session_sanitises_id(self):
+        resp = self.client.post("/sessions/my%20song%21%21%20take%202")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["session_id"], "my_song_take_2")
+        self.assertTrue((Path(self.temp_dir) / "my_song_take_2").is_dir())
 
     def test_process_session_compat_endpoint(self):
         with mock.patch.object(

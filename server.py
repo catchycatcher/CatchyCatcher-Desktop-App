@@ -20,6 +20,8 @@ Endpoints
     query parameters.
 ``GET    /sessions``
     List known session ids.
+``POST   /sessions/{session_id}``
+    Create an empty session folder ahead of recording the first take.
 ``GET    /sessions/{session_id}``
     Session manifest: every take in order, with its status and metadata.
 ``GET    /sessions/{session_id}/takes/{take_id}``
@@ -243,6 +245,7 @@ def root() -> dict[str, Any]:
         "endpoints": [
             "POST /sessions/{session_id}/takes/{take_id}",
             "GET /sessions",
+            "POST /sessions/{session_id}",
             "GET /sessions/{session_id}",
             "GET /sessions/{session_id}/takes/{take_id}",
             "GET /sessions/{session_id}/takes/{take_id}/audio/{stem}",
@@ -290,6 +293,21 @@ def list_sessions() -> dict[str, Any]:
         else []
     )
     return {"sessions": sessions}
+
+
+@app.post("/sessions/{session_id}")
+def create_session(session_id: str) -> dict[str, Any]:
+    """Create an empty session folder so the client can record takes into it.
+
+    Idempotent: posting an id that already exists leaves it untouched and
+    reports ``created: false``. This lets the client "prepare" a session before
+    the first take is uploaded (takes would create the folder implicitly too).
+    """
+    sid = sanitize_id(session_id)
+    session_dir = _session_dir(sid)
+    created = not session_dir.is_dir()
+    (session_dir / "takes").mkdir(parents=True, exist_ok=True)
+    return {"session_id": sid, "created": created, "created_at": _now()}
 
 
 @app.get("/sessions/{session_id}")
