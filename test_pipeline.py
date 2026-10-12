@@ -69,28 +69,41 @@ class GroupWordsIntoLinesTests(unittest.TestCase):
         self.assertEqual(len(pipeline.group_words_into_lines(words, 0.4)), 1)
         self.assertEqual(len(pipeline.group_words_into_lines(words, 0.1)), 2)
 
-    def test_sentence_end_punctuation_splits_on_a_small_pause(self):
-        # 0.12s is well under the 0.4s threshold, but the full stop says the
-        # sentence is over.
-        words = [word("hello.", 0.0, 0.5), word("world", 0.62, 1.0)]
-        lines = pipeline.group_words_into_lines(words, silence_threshold=0.4)
-        self.assertEqual([[w["word"] for w in line] for line in lines], [["hello."], ["world"]])
+    def test_sentence_end_needs_a_real_pause_to_split(self):
+        # A full stop with a solid breath ends the line ...
+        long_breath = [word("hello.", 0.0, 0.5), word("world", 0.8, 1.2)]  # 0.3s
+        self.assertEqual(len(pipeline.group_words_into_lines(long_breath, 0.4)), 2)
+
+        # ... but a tiny wobble after a full stop does not (that was noise).
+        tiny = [word("hello.", 0.0, 0.5), word("world", 0.62, 1.0)]  # 0.12s
+        self.assertEqual(len(pipeline.group_words_into_lines(tiny, 0.4)), 1)
 
     def test_period_without_any_pause_stays_on_one_line(self):
         # A '.' with no breath at all is not trusted (WhisperX slips them in).
         words = [word("hello.", 0.0, 0.5), word("world", 0.5, 1.0)]
         self.assertEqual(len(pipeline.group_words_into_lines(words, 0.4)), 1)
 
+    def test_timing_jitter_alone_does_not_split(self):
+        # Gaps wobbling between 0.02s and 0.2s with no punctuation is ordinary
+        # timing noise, not phrase boundaries: it must stay on one line.
+        gaps = [0.02, 0.18, 0.05, 0.12, 0.2, 0.03, 0.16, 0.08]
+        words = []
+        cursor = 0.0
+        for index, gap in enumerate(gaps):
+            words.append(word(f"w{index}", round(cursor, 3), round(cursor + 0.25, 3)))
+            cursor += 0.25 + gap
+        self.assertEqual(len(pipeline.group_words_into_lines(words, silence_threshold=0.4)), 1)
+
     def test_comma_tips_a_moderate_pause_over_the_line(self):
-        # The 0.17s gap is only ~1.1x the surrounding 0.15s gaps. The combined
-        # score leaves it just short of a break — until the comma's weight is
-        # added, which pushes it over.
+        # A 0.25s gap with gaps of ~0.15s around it sits just under the break
+        # score; the comma's weight pushes it over. Remove the comma and it
+        # stays on one line.
         base = [
             word("a", 0.0, 0.5),
             word("hello,", 0.65, 1.15),
-            word("b", 1.32, 1.82),
-            word("c", 1.97, 2.47),
-            word("d", 2.62, 3.12),
+            word("b", 1.40, 1.90),
+            word("c", 2.05, 2.55),
+            word("d", 2.70, 3.20),
         ]
         comma = pipeline.group_words_into_lines(base, silence_threshold=0.4)
         self.assertEqual(len(comma), 2)

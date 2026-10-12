@@ -58,11 +58,17 @@ SILENCE_THRESHOLD = 0.4
 # when the total clears zero. This lets a comma tip an otherwise ordinary pause
 # over the line, and lets a long line be broken even without punctuation.
 #
-#   score = W_GAP   * (gap / silence_threshold)      # a real pause
-#         + W_REL   * (gap / local_median_gap - 1)   # long for this singer
-#         + W_PUNCT * punctuation_weight             # . ! ? vs , ; :
-#         + W_LEN   * (line_seconds / nearby - 1)    # long for nearby lines
+#   score = W_GAP   * (gap / silence_threshold)              # a real pause
+#         + MIN(gap / MIN_BREAK_GAP, 1) * (                  # (soft signals only
+#               W_REL   * (gap / local_median_gap - 1)       #  count once a
+#             + W_PUNCT * punctuation_weight)                #  pause exists)
+#         + W_LEN   * (line_seconds / nearby - SLACK)        # long vs nearby lines
 #         - BIAS
+#
+# A gap at ``silence_threshold`` scores ``1.0 - BIAS > 0`` on its own, so a clear
+# pause always breaks. The softer signals are deliberately conservative: they
+# need a real pause (``MIN_BREAK_GAP``) to have any effect, which keeps tiny
+# timing wobbles and stray punctuation from splitting the middle of a phrase.
 #
 # ``group_words_into_lines`` runs twice: once to learn the typical line length,
 # then again with the nearby-line signal enabled.
@@ -71,16 +77,23 @@ SILENCE_THRESHOLD = 0.4
 #: exactly at the threshold contributes that whole weight.
 GAP_WEIGHT = 1.0
 #: Weight of "this pause is long compared to the surrounding words".
-RELATIVE_GAP_WEIGHT = 0.8
+RELATIVE_GAP_WEIGHT = 0.35
 #: Weight of sentence/clause punctuation.
-PUNCTUATION_WEIGHT = 0.55
+PUNCTUATION_WEIGHT = 0.4
 #: Weight of "this line is long compared to nearby lines".
-LINE_LENGTH_WEIGHT = 0.9
+LINE_LENGTH_WEIGHT = 0.7
 #: Subtracted from the total; the boundary breaks when the score is >= 0.
-BREAK_BIAS = 0.65
+BREAK_BIAS = 0.9
 #: Caps that keep individual terms from dominating the score.
 MAX_GAP_RATIO = 3.0
-MAX_RELATIVE_RATIO = 4.0
+MAX_RELATIVE_RATIO = 2.5
+#: A pause shorter than this can never be broken by the softer signals alone
+#: (relative pause, punctuation, nearby line length). Below it, those signals
+#: are scaled down toward nothing, so tiny timing wobbles do not split a line.
+MIN_BREAK_GAP = 0.25
+#: A line must reach this multiple of the nearby line length before the length
+#: signal starts contributing at all.
+LINE_LENGTH_SLACK = 1.25
 
 #: Punctuation that very strongly suggests the line ends here.
 SENTENCE_END_PUNCTUATION = ".!?…"
@@ -230,17 +243,41 @@ def _break_score(
     if scale > 0:
         x_relative = _clamp(gap / scale, 0.0, MAX_RELATIVE_RATIO) - 1.0
 
-    score = (
-        GAP_WEIGHT * x_gap
-        + RELATIVE_GAP_WEIGHT * x_relative
+    support = (
+        RELATIVE_GAP_WEIGHT * x_relative
         + PUNCTUATION_WEIGHT * _punct_weight(str(words[index].get("word", "")))
     )
+    # Softer signals only count once there is a real pause to react to.
+    if MIN_BREAK_GAP > 0:
+        support *= _clamp(gap / MIN_BREAK_GAP, 0.0, 1.0)
+
+    score = GAP_WEIGHT * x_gap + support
 
     if nearby_seconds and nearby_seconds > 0:
         line_seconds = float(words[index]["end"]) - float(words[line_start]["start"])
-        score += LINE_LENGTH_WEIGHT * max(0.0, line_seconds / nearby_seconds - 1.0)
+        over = line_seconds / nearby_seconds - LINE_LENGTH_SLACK
+        score += LINE_LENGTH_WEIGHT * max(0.0, over)
 
     return score - BREAK_BIAS
+
+
+def _best_internal_boundary(
+    words: list[dict[str, Any]], gaps: list[float], start: int, index: int
+) -> int:
+    """The strongest boundary in ``[start, index)`` for a forced cap split.
+
+    Biggest pause first, then punctuation strength, then the boundary nearest
+    the middle of the line (so a uniform run splits evenly).
+    """
+    middle = (start + index) / 2
+    return max(
+        range(start, index),
+        key=lambda j: (
+            round(gaps[j], 3),
+            _punct_weight(str(words[j].get("word", ""))),
+            -abs(j - middle),
+        ),
+    )
 
 
 def _segment_lines(
@@ -255,22 +292,33 @@ def _segment_lines(
     lines: list[list[dict[str, Any]]] = []
     recent_lengths: list[float] = []
     start = 0
+    index = 0
 
-    for index in range(len(gaps)):
+    while index < len(gaps):
         count = index - start + 1
         seconds = float(words[index]["end"]) - float(words[start]["start"])
-        over_cap = count >= max_line_words or seconds >= max_line_seconds
+
+        # Hard cap: cut at the best boundary inside the line, then carry on.
+        if count >= max_line_words or seconds >= max_line_seconds:
+            cut = _best_internal_boundary(words, gaps, start, index) if index > start else index
+            lines.append(words[start : cut + 1])
+            recent_lengths.append(float(words[cut]["end"]) - float(words[start]["start"]))
+            if len(recent_lengths) > LINE_WINDOW:
+                recent_lengths.pop(0)
+            start = cut + 1
+            index = cut + 1
+            continue
 
         # "Nearby lines" = the lines we just finished (they tend to be similar).
         target = statistics.median(recent_lengths) if recent_lengths else nearby_seconds
-        score = _break_score(words, gaps, index, start, silence_threshold, target)
-
-        if over_cap or score >= 0.0:
+        if _break_score(words, gaps, index, start, silence_threshold, target) >= 0.0:
             lines.append(words[start : index + 1])
             recent_lengths.append(float(words[index]["end"]) - float(words[start]["start"]))
             if len(recent_lengths) > LINE_WINDOW:
                 recent_lengths.pop(0)
             start = index + 1
+
+        index += 1
 
     lines.append(words[start:])
     return lines
