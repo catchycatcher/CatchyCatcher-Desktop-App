@@ -1335,7 +1335,12 @@ def _normalize_lines(lines: Any) -> list[dict[str, Any]]:
         if isinstance(group, dict) and group.get("type") in SECTION_TYPES:
             group_id = str(group.get("id", "")).strip()[:64]
             if group_id:
-                entry["group"] = {"id": group_id, "type": str(group["type"])}
+                name = str(group.get("name", "")).strip()
+                entry["group"] = {
+                    "id": group_id,
+                    "type": str(group["type"]),
+                    "name": _clean_name(name or str(group["type"]).capitalize(), str(group["type"])),
+                }
         normalized.append(entry)
     return normalized
 

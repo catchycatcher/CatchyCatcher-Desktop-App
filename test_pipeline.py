@@ -1351,7 +1351,7 @@ class ApiTests(unittest.TestCase):
         ).json()["scrapbook_id"]
 
         lines = self.client.get(f"/sessions/grp/scrapbooks/{sid}").json()["lines"]
-        self.assertEqual(lines[0]["group"], {"id": "g1", "type": "chorus"})
+        self.assertEqual(lines[0]["group"], {"id": "g1", "type": "chorus", "name": "Chorus"})
         self.assertNotIn("group", lines[1])
         # An unknown section type is dropped.
         self.assertNotIn("group", lines[2])
