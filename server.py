@@ -21,7 +21,7 @@ Endpoints
 ``POST   /sessions/{session_id}/takes/{take_id}/process``
     Process a take that was previously stored unprocessed.
 ``PATCH  /sessions/{session_id}/takes/{take_id}``
-    Rename a journal entry (``name`` query parameter).
+    Rename a journal entry and/or toggle its ``bookmarked`` flag.
 ``GET    /sessions``
     List stored sessions as ``{"id", "name", "updated_at"}`` objects, ordered by
     id.
@@ -46,6 +46,24 @@ Endpoints
     Single-shot convenience endpoint from the original spec. Equivalent to
     creating a session named after the file with one take called ``take``.
 
+Scrapbooks
+----------
+``GET    /scrapbooks``
+    List scrapbooks (``{scrapbook_id, name, bpm, line_count, ...}``).
+``POST   /scrapbooks``
+    Create one from ``{name, bpm, lines}`` where each line is
+    ``{session_id, take_id, line_index}``.
+``GET    /scrapbooks/{scrapbook_id}``
+    One scrapbook, with its lines and last render.
+``PATCH  /scrapbooks/{scrapbook_id}``
+    Update ``name``/``bpm``/``lines`` (edits invalidate the render).
+``DELETE /scrapbooks/{scrapbook_id}``
+    Delete a scrapbook and its mix.
+``POST   /scrapbooks/{scrapbook_id}/render``
+    Render (or return the cached) tempo-matched mix and word timeline.
+``GET    /scrapbooks/{scrapbook_id}/audio``
+    Stream a scrapbook's rendered mix.
+
 Configuration is via environment variables:
 
 ============================== ==================================================
@@ -62,6 +80,7 @@ Configuration is via environment variables:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -73,11 +92,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 import pipeline
+import scrapbook
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -85,6 +105,11 @@ SESSIONS_DIR = Path(
     os.environ.get("CATCHYCATCHER_UPLOAD_DIR", BASE_DIR / "sessions")
 ).resolve()
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+SCRAPBOOKS_DIR = Path(
+    os.environ.get("CATCHYCATCHER_SCRAPBOOK_DIR", BASE_DIR / "scrapbooks")
+).resolve()
+SCRAPBOOKS_DIR.mkdir(parents=True, exist_ok=True)
 
 _raw_origins = os.environ.get("CATCHYCATCHER_CORS_ORIGINS", "*").strip()
 if _raw_origins in ("", "*"):
@@ -391,6 +416,7 @@ def _save_take(
         "name": _clean_name(name, prior_name),
         "filename": file.filename,
         "input_filename": input_name,
+        "bookmarked": bool(previous.get("bookmarked", False)),
         "processed": False,
         "status": "recorded",
         "error": None,
@@ -512,6 +538,13 @@ def root() -> dict[str, Any]:
             "GET /sessions/{session_id}/takes/{take_id}/original",
             "DELETE /sessions/{session_id}/takes/{take_id}",
             "POST /process-session",
+            "GET /scrapbooks",
+            "POST /scrapbooks",
+            "GET /scrapbooks/{scrapbook_id}",
+            "PATCH /scrapbooks/{scrapbook_id}",
+            "DELETE /scrapbooks/{scrapbook_id}",
+            "POST /scrapbooks/{scrapbook_id}/render",
+            "GET /scrapbooks/{scrapbook_id}/audio",
         ],
         "docs": "/docs",
     }
@@ -557,22 +590,30 @@ def create_take(
 
 
 @app.patch("/sessions/{session_id}/takes/{take_id}")
-def rename_take(
+def update_take(
     session_id: str,
     take_id: str,
-    name: str = Query(..., min_length=1, description="New entry name."),
+    name: str | None = Query(default=None, min_length=1, description="New entry name."),
+    bookmarked: bool | None = Query(default=None, description="Mark/unmark the entry."),
 ) -> dict[str, Any]:
-    """Rename a journal entry; its audio and result are untouched."""
+    """Rename a journal entry and/or toggle its bookmark; audio is untouched."""
     sid = sanitize_id(session_id)
     tid = sanitize_id(take_id)
     take_dir = _take_dir(sid, tid)
     meta = _read_json(take_dir / "meta.json")
     if meta is None:
         raise HTTPException(status_code=404, detail="Unknown take.")
-    meta["name"] = _clean_name(name, tid)
+    if name is not None:
+        meta["name"] = _clean_name(name, tid)
+    if bookmarked is not None:
+        meta["bookmarked"] = bool(bookmarked)
     _write_json(take_dir / "meta.json", meta)
     _touch_session(sid)
-    return {"take_id": tid, "name": meta["name"]}
+    return {
+        "take_id": tid,
+        "name": meta.get("name"),
+        "bookmarked": bool(meta.get("bookmarked", False)),
+    }
 
 
 @app.post("/sessions/{session_id}/takes/{take_id}/process")
@@ -766,6 +807,249 @@ def process_session_endpoint(
         None,
         silence_threshold,
     )
+
+
+# ---------------------------------------------------------------------------
+# Scrapbooks
+# ---------------------------------------------------------------------------
+#
+# A scrapbook is an ordered list of lines referenced from processed takes, plus
+# one BPM every line is stretched to. It is the *only* place lines can be added,
+# removed or reordered. Rendering stitches the isolated vocals into one mix; the
+# result is cached against a signature of the BPM + line list.
+
+
+def _scrapbook_dir(scrapbook_id: str) -> Path:
+    return SCRAPBOOKS_DIR / sanitize_id(scrapbook_id)
+
+
+def _scrapbook_meta_path(scrapbook_id: str) -> Path:
+    return _scrapbook_dir(scrapbook_id) / "scrapbook.json"
+
+
+def _normalize_lines(lines: Any) -> list[dict[str, Any]]:
+    """Keep only well-formed ``{session_id, take_id, line_index}`` references."""
+    if not isinstance(lines, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for ref in lines:
+        if not isinstance(ref, dict):
+            continue
+        session_id = str(ref.get("session_id", "")).strip()
+        take_id = str(ref.get("take_id", "")).strip()
+        try:
+            line_index = int(ref.get("line_index", -1))
+        except (TypeError, ValueError):
+            continue
+        if not session_id or not take_id or line_index < 0:
+            continue
+        ref = {
+            "session_id": sanitize_id(session_id),
+            "take_id": sanitize_id(take_id),
+            "line_index": line_index,
+        }
+        # Only keep lines that actually resolve to a processed take.
+        try:
+            _line_data(ref)
+        except HTTPException:
+            continue
+        normalized.append(ref)
+    return normalized
+
+
+def _clean_bpm(bpm: Any, fallback: float = 120.0) -> float:
+    try:
+        value = float(bpm)
+    except (TypeError, ValueError):
+        return fallback
+    if value <= 20 or value >= 400:
+        return fallback
+    return round(value, 1)
+
+
+def _scrapbook_signature(bpm: float, lines: list[dict[str, Any]]) -> str:
+    payload = json.dumps({"bpm": bpm, "lines": lines}, sort_keys=True)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _load_scrapbook(scrapbook_id: str) -> dict[str, Any]:
+    meta = _read_json(_scrapbook_meta_path(scrapbook_id))
+    if not isinstance(meta, dict):
+        raise HTTPException(status_code=404, detail=f"Unknown scrapbook {scrapbook_id!r}.")
+    return meta
+
+
+def _scrapbook_summary(meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "scrapbook_id": meta.get("scrapbook_id"),
+        "name": meta.get("name"),
+        "bpm": meta.get("bpm"),
+        "line_count": len(meta.get("lines") or []),
+        "created_at": meta.get("created_at"),
+        "updated_at": meta.get("updated_at"),
+        "rendered": bool(meta.get("render")),
+    }
+
+
+def _line_data(ref: dict[str, Any]) -> dict[str, Any]:
+    """Resolve one scrapbook line reference into what the renderer needs."""
+    sid = sanitize_id(str(ref.get("session_id", "")))
+    tid = sanitize_id(str(ref.get("take_id", "")))
+    index = int(ref.get("line_index", 0))
+    take_dir = _take_dir(sid, tid)
+    result = _read_json(take_dir / "result.json")
+    lyrics = result.get("lyrics") if isinstance(result, dict) else None
+    if not isinstance(lyrics, list) or not 0 <= index < len(lyrics):
+        raise HTTPException(
+            status_code=400, detail=f"Line {sid}/{tid}/{index} is no longer available."
+        )
+    line = lyrics[index]
+    vocals = take_dir / "vocals.m4a"
+    if not vocals.is_file():
+        raise HTTPException(status_code=400, detail=f"No isolated vocals for {sid}/{tid}.")
+
+    previous = lyrics[index - 1] if index > 0 else None
+    following = lyrics[index + 1] if index + 1 < len(lyrics) else None
+    return {
+        "bpm": float(line.get("bpm") or 120.0),
+        "start": float(line["start time"]),
+        "end": float(line["end time"]),
+        "words": line.get("words") or [],
+        "gap_before": (
+            float(line["start time"]) - float(previous["end time"]) if previous else None
+        ),
+        "gap_after": (
+            float(following["start time"]) - float(line["end time"]) if following else None
+        ),
+        "vocals": vocals,
+    }
+
+
+def _render_scrapbook(meta: dict[str, Any]) -> dict[str, Any]:
+    sid = str(meta["scrapbook_id"])
+    bpm = _clean_bpm(meta.get("bpm"))
+    lines = meta.get("lines") or []
+    signature = _scrapbook_signature(bpm, lines)
+    mix = _scrapbook_dir(sid) / "mix.m4a"
+
+    cached = meta.get("render")
+    if isinstance(cached, dict) and cached.get("signature") == signature and mix.is_file():
+        return cached
+
+    if not lines:
+        raise HTTPException(status_code=400, detail="Add at least one line before rendering.")
+
+    entries = [_line_data(ref) for ref in lines]
+    with PROCESS_LOCK:
+        timeline, gaps, _mix = scrapbook.render(entries, bpm, _scrapbook_dir(sid))
+
+    render = {
+        "signature": signature,
+        "audio": f"/scrapbooks/{sid}/audio",
+        "bpm": bpm,
+        "timeline": timeline,
+        "gaps": gaps,
+        "rendered_at": _now(),
+    }
+    meta["render"] = render
+    meta["updated_at"] = _now()
+    _write_json(_scrapbook_meta_path(sid), meta)
+    return render
+
+
+@app.get("/scrapbooks")
+def list_scrapbooks() -> dict[str, Any]:
+    """List scrapbooks, most recently updated first."""
+    items = []
+    if SCRAPBOOKS_DIR.is_dir():
+        for path in SCRAPBOOKS_DIR.iterdir():
+            if not path.is_dir():
+                continue
+            meta = _read_json(path / "scrapbook.json")
+            if isinstance(meta, dict):
+                items.append(_scrapbook_summary(meta))
+    items.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+    return {"scrapbooks": items}
+
+
+@app.post("/scrapbooks")
+def create_scrapbook(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    """Create a scrapbook from ``{name, bpm, lines}``."""
+    name = _clean_name(body.get("name"), "Scrapbook")
+    bpm = _clean_bpm(body.get("bpm"))
+    lines = _normalize_lines(body.get("lines"))
+    scrapbook_id = f"sb-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
+    now = _now()
+    meta = {
+        "scrapbook_id": scrapbook_id,
+        "name": name,
+        "bpm": bpm,
+        "lines": lines,
+        "created_at": now,
+        "updated_at": now,
+    }
+    _scrapbook_dir(scrapbook_id).mkdir(parents=True, exist_ok=True)
+    _write_json(_scrapbook_meta_path(scrapbook_id), meta)
+    return _scrapbook_summary(meta)
+
+
+@app.get("/scrapbooks/{scrapbook_id}")
+def get_scrapbook(scrapbook_id: str) -> dict[str, Any]:
+    """Return a scrapbook with its lines and last render, if any."""
+    meta = _load_scrapbook(scrapbook_id)
+    result = _scrapbook_summary(meta)
+    result["lines"] = meta.get("lines") or []
+    result["render"] = meta.get("render")
+    return result
+
+
+@app.patch("/scrapbooks/{scrapbook_id}")
+def update_scrapbook(
+    scrapbook_id: str, body: dict[str, Any] = Body(default={})
+) -> dict[str, Any]:
+    """Update ``name``, ``bpm`` and/or ``lines``. Edits invalidate the render."""
+    meta = _load_scrapbook(scrapbook_id)
+    if "name" in body:
+        meta["name"] = _clean_name(body.get("name"), meta.get("name") or "Scrapbook")
+    if "bpm" in body:
+        meta["bpm"] = _clean_bpm(body.get("bpm"), meta.get("bpm") or 120.0)
+    if "lines" in body:
+        meta["lines"] = _normalize_lines(body.get("lines"))
+    meta["updated_at"] = _now()
+    _write_json(_scrapbook_meta_path(scrapbook_id), meta)
+    result = _scrapbook_summary(meta)
+    result["lines"] = meta.get("lines") or []
+    result["render"] = meta.get("render")
+    return result
+
+
+@app.delete("/scrapbooks/{scrapbook_id}")
+def delete_scrapbook(scrapbook_id: str) -> dict[str, Any]:
+    """Delete a scrapbook and its rendered mix."""
+    sid = sanitize_id(scrapbook_id)
+    path = _scrapbook_dir(sid)
+    if not path.is_dir():
+        raise HTTPException(status_code=404, detail=f"Unknown scrapbook {sid!r}.")
+    shutil.rmtree(path)
+    return {"deleted": True, "scrapbook_id": sid}
+
+
+@app.post("/scrapbooks/{scrapbook_id}/render")
+def render_scrapbook(scrapbook_id: str) -> dict[str, Any]:
+    """Render (or return the cached) tempo-matched mix for a scrapbook."""
+    meta = _load_scrapbook(scrapbook_id)
+    return _render_scrapbook(meta)
+
+
+@app.get("/scrapbooks/{scrapbook_id}/audio")
+def get_scrapbook_audio(scrapbook_id: str) -> FileResponse:
+    """Stream a scrapbook's rendered mix."""
+    meta = _load_scrapbook(scrapbook_id)
+    sid = str(meta["scrapbook_id"])
+    mix = _scrapbook_dir(sid) / "mix.m4a"
+    if not mix.is_file():
+        raise HTTPException(status_code=404, detail="Scrapbook has not been rendered.")
+    return FileResponse(mix, media_type="audio/mp4", filename=f"{sid}.m4a")
 
 
 def main() -> None:

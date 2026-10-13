@@ -30,7 +30,8 @@ The full specification lives in [`../SYSTEM_INSTRUCTIONS.md`](../SYSTEM_INSTRUCT
 | --- | --- |
 | `pipeline.py` | `process_song_session()` — the whole DSP/AI pipeline for one take; returns the spec JSON. Also holds `group_words_into_lines()`, the four-stage line-break model. Caches models between takes. |
 | `phonetics.py` | Rhyme helpers backed by the CMU pronunciation dictionary (`pronouncing`), with a spelling fallback; used by the line-break model. |
-| `server.py` | FastAPI app: sessions, takes, stem streaming, health. |
+| `server.py` | FastAPI app: sessions, takes, scrapbooks, stem streaming, health. |
+| `scrapbook.py` | Scrapbook rendering: ffmpeg `atempo` time-stretch, gap blending, mix concat. |
 | `run.py` | One-command launcher: sets the environment up if needed, then starts the server and the share tunnel. |
 | `tunnel.py` | Gradio share tunnel, driven by `run.py`. |
 | `share_code.py` | Dependency-free base62 share-code maths (kept out of `tunnel.py` so it is testable). |
@@ -185,6 +186,7 @@ Open `http://<desktop-ip>:8000/docs` for interactive Swagger UI.
 | `CATCHYCATCHER_HOST` | `0.0.0.0` | Bind host. |
 | `CATCHYCATCHER_PORT` | `8000` | Bind port. |
 | `CATCHYCATCHER_UPLOAD_DIR` | `./sessions` | Session storage root. |
+| `CATCHYCATCHER_SCRAPBOOK_DIR` | `./scrapbooks` | Scrapbook storage root. |
 | `CATCHYCATCHER_CORS_ORIGINS` | `*` | Comma-separated allowed origins, or `*`. |
 | `CATCHYCATCHER_LOG_LEVEL` | `info` | Uvicorn log level (`run.py` sets `warning` unless `--verbose`). |
 | `CATCHYCATCHER_REQUEST_LOG` | `info` | Level for the per-request log line; `off` silences it. |
@@ -215,6 +217,19 @@ existed simply fall back to showing the id.
 `session_id` and `take_id` are sanitised to a single safe path segment, so
 `../../etc` cannot escape the root.
 
+Scrapbooks live beside the sessions:
+
+```
+scrapbooks/
+  <scrapbook_id>/
+    scrapbook.json       # name, bpm, ordered line refs, cached render
+    mix.m4a              # the rendered, tempo-matched mix
+    render/              # per-line/gap scratch WAVs (safe to delete)
+```
+
+A scrapbook line is just `{session_id, take_id, line_index}`; the audio is always
+read fresh from the referenced take's `vocals.m4a`.
+
 ## API
 
 ### `POST /sessions/{session_id}/takes/{take_id}`
@@ -227,6 +242,8 @@ Optional query parameters:
 | Param | Default | Meaning |
 | --- | --- | --- |
 | `index` | one past the highest existing take | 1-based position within the session. |
+| `name` | the take id | Display name for the entry. |
+| `process` | `true` | `false` stores the audio only; process later via `POST …/process`. |
 | `silence_threshold` | `0.4` | Pause (seconds, `0 < x <= 5`) that starts a new lyric line. |
 
 Response body:
@@ -263,9 +280,34 @@ headers.
 | `DELETE` | `/sessions/{session_id}` | Delete a session and every take inside it. |
 | `GET` | `/sessions/{session_id}` | Manifest: the session `name`, then every take in order with status. |
 | `GET` | `/sessions/{session_id}/takes/{take_id}` | One take's metadata + result. |
+| `PATCH` | `/sessions/{session_id}/takes/{take_id}` | Rename an entry and/or toggle its bookmark (`?name=…`, `?bookmarked=true|false`). |
+| `POST` | `/sessions/{session_id}/takes/{take_id}/process` | Process a take that was stored with `process=false`. |
 | `GET` | `/sessions/{session_id}/takes/{take_id}/audio/{stem}` | Stream `vocals` or `background` (`audio/mp4`). |
+| `GET` | `/sessions/{session_id}/takes/{take_id}/original` | Stream the raw recording, processed or not. |
 | `DELETE` | `/sessions/{session_id}/takes/{take_id}` | Delete a take and its files. |
 | `POST` | `/process-session` | Single-shot compat endpoint (spec). Equivalent to a session named after the file with one take called `take`. |
+
+### Scrapbooks
+
+A scrapbook is an ordered list of lines lifted from processed takes, with one
+BPM every line is stretched to (pitch-preserving). It is the only place lines can
+be added, removed or reordered. Editing invalidates the cached render.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/scrapbooks` | List scrapbooks, most recently updated first. |
+| `POST` | `/scrapbooks` | Create from `{name, bpm, lines}` (`lines` are `{session_id, take_id, line_index}`). |
+| `GET` | `/scrapbooks/{scrapbook_id}` | One scrapbook with its lines and last render. |
+| `PATCH` | `/scrapbooks/{scrapbook_id}` | Update `name`/`bpm`/`lines`. |
+| `DELETE` | `/scrapbooks/{scrapbook_id}` | Delete a scrapbook and its mix. |
+| `POST` | `/scrapbooks/{scrapbook_id}/render` | Render (or return the cached) mix + word timeline. |
+| `GET` | `/scrapbooks/{scrapbook_id}/audio` | Stream the rendered mix (`audio/mp4`). |
+
+Rendering cuts `[start time, end time]` from each line's isolated vocals, applies
+`atempo = scrapbook_bpm / line_bpm`, and inserts a gap between each pair. The gap
+is the mean of the pause that followed the first line and the pause that preceded
+the second line in their own journals, each scaled by its own tempo change (with
+a fallback when a line was at the edge of its journal).
 
 ### Example
 

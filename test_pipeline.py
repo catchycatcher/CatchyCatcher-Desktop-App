@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 
 import phonetics
 import pipeline
+import scrapbook
 import server
 import share_code
 from server import sanitize_id
@@ -631,18 +632,94 @@ class ProcessSongSessionFlowTests(unittest.TestCase):
         )
 
 
+class ScrapbookTimelineTests(unittest.TestCase):
+    """The pure tempo/gap maths behind a rendered scrapbook mix."""
+
+    def test_atempo_is_split_into_supported_factors(self):
+        self.assertEqual(scrapbook.atempo_factors(1.0), [1.0])
+        self.assertEqual(scrapbook.atempo_factors(3.0), [2.0, 1.5])
+        self.assertEqual(scrapbook.atempo_factors(0.25), [0.5, 0.5])
+        product = 1.0
+        for factor in scrapbook.atempo_factors(1.7):
+            product *= factor
+        self.assertAlmostEqual(product, 1.7, places=5)
+
+    def test_timeline_stretches_lines_and_blends_gaps(self):
+        entries = [
+            {
+                "bpm": 100.0,
+                "start": 0.0,
+                "end": 2.0,
+                "gap_after": 0.5,
+                "words": [
+                    {"word": "a", "start": 0.0, "end": 1.0, "length": 1.0},
+                    {"word": "b", "start": 1.0, "end": 2.0, "length": 1.0},
+                ],
+            },
+            {
+                "bpm": 120.0,
+                "start": 10.0,
+                "end": 12.0,
+                "gap_before": 0.3,
+                "words": [{"word": "c", "start": 10.0, "end": 11.0, "length": 1.0}],
+            },
+        ]
+        timeline, gaps = scrapbook.build_timeline(entries, 100.0)
+
+        # First line is already at the target tempo.
+        self.assertAlmostEqual(timeline[0]["start time"], 0.0, places=3)
+        self.assertAlmostEqual(timeline[0]["end time"], 2.0, places=3)
+
+        # Gap = mean(0.5 * 100/100, 0.3 * 120/100) = mean(0.5, 0.36) = 0.43.
+        self.assertEqual(len(gaps), 1)
+        self.assertAlmostEqual(gaps[0], 0.43, places=3)
+
+        # Second line sped up to the target: 2s at 120bpm -> 2.4s of audio.
+        self.assertAlmostEqual(timeline[1]["start time"], 2.43, places=3)
+        self.assertAlmostEqual(timeline[1]["end time"], 4.83, places=3)
+        self.assertAlmostEqual(timeline[1]["words"][0]["end"], 3.63, places=3)
+
+    def test_single_line_has_no_gaps(self):
+        entries = [
+            {"bpm": 90.0, "start": 1.0, "end": 2.0, "words": [], "gap_after": 0.9, "gap_before": 0.4}
+        ]
+        timeline, gaps = scrapbook.build_timeline(entries, 120.0)
+        self.assertEqual(gaps, [])
+        self.assertAlmostEqual(timeline[0]["start time"], 0.0, places=3)
+        self.assertAlmostEqual(timeline[0]["end time"], 0.75, places=3)
+
+    def test_fallback_gap_when_no_source_pause_is_known(self):
+        entries = [
+            {"bpm": 120.0, "start": 0.0, "end": 1.0, "words": []},
+            {"bpm": 120.0, "start": 5.0, "end": 6.0, "words": []},
+        ]
+        _timeline, gaps = scrapbook.build_timeline(entries, 120.0)
+        self.assertAlmostEqual(gaps[0], scrapbook.DEFAULT_GAP_SECONDS, places=3)
+
+    def test_extract_command_applies_tempo(self):
+        command = scrapbook.extract_command("vocals.m4a", 1.5, 2.0, 1.5, Path("/tmp/out.wav"))
+        self.assertIn("atempo=1.5", command)
+        self.assertIn("vocals.m4a", command)
+        self.assertIn("-ss", command)
+
+
 class ApiTests(unittest.TestCase):
     """HTTP-level tests for session/take organisation, with the pipeline stubbed."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="catchy_api_")
+        self.scrapbook_dir = tempfile.mkdtemp(prefix="catchy_sb_")
         self._orig_sessions = server.SESSIONS_DIR
+        self._orig_scrapbooks = server.SCRAPBOOKS_DIR
         server.SESSIONS_DIR = Path(self.temp_dir)
+        server.SCRAPBOOKS_DIR = Path(self.scrapbook_dir)
         self.client = TestClient(server.app)
 
     def tearDown(self):
         server.SESSIONS_DIR = self._orig_sessions
+        server.SCRAPBOOKS_DIR = self._orig_scrapbooks
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+        shutil.rmtree(self.scrapbook_dir, ignore_errors=True)
 
     @staticmethod
     def _fake_process(holder):
@@ -953,6 +1030,86 @@ class ApiTests(unittest.TestCase):
 
         missing = self.client.patch("/sessions/named/takes/nope", params={"name": "x"})
         self.assertEqual(missing.status_code, 404)
+
+    def test_bookmark_take(self):
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            self.client.post(
+                "/sessions/bm/takes/t", files={"file": ("t.m4a", b"x", "audio/mp4")}
+            )
+        resp = self.client.patch("/sessions/bm/takes/t", params={"bookmarked": "true"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertTrue(resp.json()["bookmarked"])
+        self.assertTrue(self.client.get("/sessions/bm").json()["takes"][0]["bookmarked"])
+
+        off = self.client.patch("/sessions/bm/takes/t", params={"bookmarked": "false"})
+        self.assertFalse(off.json()["bookmarked"])
+
+    def test_scrapbook_lifecycle_and_render(self):
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            self.client.post(
+                "/sessions/src/takes/t1", files={"file": ("t1.m4a", b"x", "audio/mp4")}
+            )
+
+        created = self.client.post(
+            "/scrapbooks",
+            json={
+                "name": "My Mix",
+                "bpm": 108,
+                "lines": [
+                    {"session_id": "src", "take_id": "t1", "line_index": 0},
+                    {"session_id": "src", "take_id": "t1", "line_index": 99},  # bad, dropped
+                    "junk",
+                ],
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        sid = created.json()["scrapbook_id"]
+        self.assertEqual(created.json()["line_count"], 1)
+        self.assertEqual(created.json()["bpm"], 108.0)
+
+        listed = self.client.get("/scrapbooks").json()["scrapbooks"]
+        self.assertIn(sid, [item["scrapbook_id"] for item in listed])
+
+        def fake_render(entries, target_bpm, output_dir):
+            path = Path(output_dir)
+            path.mkdir(parents=True, exist_ok=True)
+            mix = path / "mix.m4a"
+            mix.write_bytes(b"MIX")
+            timeline = [{"bpm": target_bpm, "start time": 0.0, "end time": 1.0, "words": []}]
+            return timeline, [], mix
+
+        with mock.patch.object(server.scrapbook, "render", side_effect=fake_render) as render:
+            rendered = self.client.post(f"/scrapbooks/{sid}/render")
+        self.assertEqual(rendered.status_code, 200, rendered.text)
+        self.assertEqual(rendered.json()["audio"], f"/scrapbooks/{sid}/audio")
+        self.assertEqual(len(rendered.json()["timeline"]), 1)
+        self.assertEqual(render.call_count, 1)
+
+        # A second render is served from cache (the signature is unchanged).
+        with mock.patch.object(server.scrapbook, "render", side_effect=fake_render) as render2:
+            again = self.client.post(f"/scrapbooks/{sid}/render")
+        self.assertEqual(again.status_code, 200)
+        render2.assert_not_called()
+
+        audio = self.client.get(f"/scrapbooks/{sid}/audio")
+        self.assertEqual(audio.status_code, 200)
+        self.assertEqual(audio.content, b"MIX")
+
+        updated = self.client.patch(f"/scrapbooks/{sid}", json={"bpm": 90, "lines": []})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["bpm"], 90.0)
+        self.assertEqual(updated.json()["line_count"], 0)
+
+        # Empty scrapbooks cannot render.
+        empty = self.client.post(f"/scrapbooks/{sid}/render")
+        self.assertEqual(empty.status_code, 400)
+
+        self.assertEqual(self.client.delete(f"/scrapbooks/{sid}").status_code, 200)
+        self.assertEqual(self.client.get(f"/scrapbooks/{sid}").status_code, 404)
 
 
 if __name__ == "__main__":
