@@ -1,18 +1,17 @@
 """Scrapbook rendering: stitch isolated vocal lines into one tempo-matched mix.
 
-A scrapbook is an ordered list of *lines* referenced from processed takes. Every
-take is brought to one shared tempo — the scrapbook's ``target_bpm`` when set,
-otherwise the median take tempo — so the whole mix is rhythmically consistent.
+A scrapbook is an ordered list of *lines* referenced from processed takes. There
+is no single BPM: each line keeps its own recorded tempo, and only the *relative*
+tempo between neighbouring lines is adjusted.
 
-Per-line BPM estimates are too noisy to trust (a few seconds of unaccompanied
-singing has almost no steady onsets), so speed is anchored on each line's
-*source take* tempo instead, folded into a single octave so half/double errors
-agree. The median log-speed is then normalised to zero, so there is no overall
-shift.
-
-The gap between two lines is filled with the audio that actually followed and
-preceded them in their own recordings (their ``gap_after`` / ``gap_before``
-stretches), cross-faded together, never running into a neighbouring line.
+For each line we know two expected ratios from its own journal — how its tempo
+related to the line that followed it (``after``) and to the line that preceded it
+(``before``) — and the tempo of the whole take it came from. When line B is
+placed after line A, the *baseline* is the ratio of their source takes' tempos,
+and the ratio applied to B is whichever of ``after``, ``before`` or **same BPM as
+A** sits closest to that baseline. Once every line has a speed, they are
+normalised so the median log-speed is zero — so half the lines speed up and half
+slow down, with no overall shift.
 
 The module is deliberately free of FastAPI/state: callers pass in the resolved
 line data and the output directory, which keeps the maths unit-testable without
@@ -40,28 +39,8 @@ MAX_GAP_SECONDS = 3.0
 ATEMPO_MIN = 0.5
 ATEMPO_MAX = 2.0
 #: How far a line may be sped up/slowed down from its recorded tempo.
-MIN_SPEED = 0.6
-MAX_SPEED = 1.67
-#: Tempos are folded into this single octave so half/double estimates agree.
-FOLD_MIN_BPM = 70.0
-FOLD_MAX_BPM = 140.0
-
-
-def fold_bpm(bpm: float) -> float:
-    """Fold a tempo into one octave band (``[70, 140)``).
-
-    A short a-cappella line is regularly detected an octave out (60 instead of
-    120, say). Folding every tempo into the same octave makes those half/double
-    errors agree instead of becoming a 2× speed jump.
-    """
-    value = float(bpm)
-    if value <= 0:
-        return DEFAULT_BPM
-    while value < FOLD_MIN_BPM:
-        value *= 2.0
-    while value >= FOLD_MAX_BPM:
-        value /= 2.0
-    return value
+MIN_SPEED = 0.5
+MAX_SPEED = 2.0
 
 
 def atempo_factors(rate: float) -> list[float]:
@@ -109,36 +88,55 @@ def _source_words(entry: dict[str, Any], line_start: float) -> list[tuple[str, f
     return resolved
 
 
-def _line_speeds(
-    entries: list[dict[str, Any]], target_bpm: float | None = None
-) -> list[float]:
-    """Per-line playback speed so every take plays at one shared tempo.
+def _line_speeds(entries: list[dict[str, Any]]) -> list[float]:
+    """Per-line playback speed factors (1.0 = played at its recorded tempo).
 
-    Per-line BPM estimates are noisy (a few seconds of solo singing has almost
-    no steady onsets), so speed is anchored on each line's **source take** tempo
-    instead — which is far steadier — with every tempo folded into one octave so
-    half/double errors agree. Each take is then brought to the scrapbook's
-    reference tempo: ``target_bpm`` when given, otherwise the median take tempo.
+    The *baseline* for a pair of neighbours is the ratio of the tempos of the
+    takes they were sourced from (so two clips from the same-tempo takes are
+    expected to line up), rather than a scale of 1. The candidate ratios are the
+    previous line's ``after`` expectation, this line's ``before`` expectation,
+    and **same BPM as the previous line** (always available); the one closest to
+    the baseline wins.
 
-    ``speed > 1`` plays the line faster (shorter). The median log-speed is
+    ``speed > 1`` plays the line faster (shorter); the median log-speed is
     normalised to zero so there is no overall tempo shift.
     """
-    if not entries:
-        return []
+    speeds: list[float] = []
+    played: float | None = None
+    previous_take_bpm: float | None = None
 
-    tempos = [
-        fold_bpm(entry.get("take_bpm") or entry.get("bpm") or DEFAULT_BPM) for entry in entries
-    ]
+    for index, entry in enumerate(entries):
+        bpm = float(entry.get("bpm") or 120.0)
+        take_bpm = float(entry.get("take_bpm") or bpm)
 
-    reference = float(target_bpm) if target_bpm else _median(tempos)
-    if reference <= 0:
-        reference = DEFAULT_BPM
+        if played is None:
+            speeds.append(1.0)
+            played = bpm
+            previous_take_bpm = take_bpm
+            continue
 
-    speeds = [reference / tempo if tempo else 1.0 for tempo in tempos]
+        # Baseline: how the two source takes relate in tempo.
+        if previous_take_bpm:
+            baseline = take_bpm / previous_take_bpm
+        else:
+            baseline = bpm / played
 
-    if target_bpm is None:
-        # Remove any overall shift so the reference stays the median.
-        logs = [math.log(max(speed, 1e-6)) for speed in speeds]
+        # Same-BPM is always an option; the neighbours' expectations add more.
+        candidates = [1.0]
+        after = entries[index - 1].get("after")
+        before = entry.get("before")
+        if after:
+            candidates.append(float(after))
+        if before:
+            candidates.append(float(before))
+
+        chosen = min(candidates, key=lambda ratio: abs(math.log(ratio) - math.log(baseline)))
+        played = played * chosen
+        speeds.append(played / bpm)
+        previous_take_bpm = take_bpm
+
+    if speeds:
+        logs = [math.log(speed) for speed in speeds]
         shift = _median(logs)
         speeds = [math.exp(value - shift) for value in logs]
 
@@ -186,9 +184,18 @@ def _gap_between(
     return max(MIN_GAP_SECONDS, min(MAX_GAP_SECONDS, gap))
 
 
+def _with_ratios(entries: list[dict[str, Any]]) -> None:
+    """Fill in each entry's ``before``/``after`` tempo ratios (in place)."""
+    for entry in entries:
+        bpm = float(entry.get("bpm") or 120.0)
+        next_bpm = entry.get("next_bpm")
+        prev_bpm = entry.get("prev_bpm")
+        entry["after"] = (float(next_bpm) / bpm) if next_bpm else None
+        entry["before"] = (bpm / float(prev_bpm)) if prev_bpm else None
+
+
 def build_timeline(
     entries: list[dict[str, Any]],
-    target_bpm: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[float]]:
     """Lay every line out on the mix timeline at its chosen speed.
 
@@ -197,7 +204,8 @@ def build_timeline(
     ``gaps`` holds the length of the gap inserted between each consecutive pair
     (filled with the source recordings' own gap audio when rendering).
     """
-    speeds = _line_speeds(entries, target_bpm)
+    _with_ratios(entries)
+    speeds = _line_speeds(entries)
 
     timeline: list[dict[str, Any]] = []
     gaps: list[float] = []
@@ -382,9 +390,7 @@ def _run(command: list[str]) -> None:
 
 
 def render(
-    entries: list[dict[str, Any]],
-    output_dir: str | Path,
-    target_bpm: float | None = None,
+    entries: list[dict[str, Any]], output_dir: str | Path
 ) -> tuple[list[dict[str, Any]], list[float], Path]:
     """Render the whole scrapbook into ``<output_dir>/mix.m4a``.
 
@@ -399,8 +405,9 @@ def render(
     if not entries:
         raise ValueError("Cannot render a scrapbook with no lines.")
 
-    speeds = _line_speeds(entries, target_bpm)
-    timeline, gaps = build_timeline(entries, target_bpm)
+    _with_ratios(entries)
+    speeds = _line_speeds(entries)
+    timeline, gaps = build_timeline(entries)
 
     out_dir = Path(output_dir)
     work = out_dir / "render"
