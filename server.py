@@ -60,6 +60,10 @@ mirror the take routes.
     List scribbles (``{scribble_id, name, status, ...}``), newest first.
 ``POST   /scribbles/{scribble_id}``
     Upload a scribble; processed by default (``process=false`` just stores it).
+``POST   /scribbles/text``
+    Create a text-only scribble (no audio) from ``{name, lines}``.
+``PUT    /scribbles/{scribble_id}/text``
+    Replace a text scribble's lines.
 ``POST   /scribbles/{scribble_id}/process``
     Process a previously stored scribble.
 ``GET    /scribbles/{scribble_id}``
@@ -579,6 +583,8 @@ def root() -> dict[str, Any]:
             "POST /process-session",
             "GET /scribbles",
             "POST /scribbles/{scribble_id}",
+            "POST /scribbles/text",
+            "PUT /scribbles/{scribble_id}/text",
             "POST /scribbles/{scribble_id}/process",
             "GET /scribbles/{scribble_id}",
             "PATCH /scribbles/{scribble_id}",
@@ -1121,6 +1127,55 @@ def list_scribbles() -> dict[str, Any]:
     return {"scribbles": _scribble_metas()}
 
 
+def _clean_text_lines(raw: Any) -> list[str]:
+    """Normalise a text scribble's lines to trimmed, non-empty strings."""
+    lines: list[str] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                item = item.get("text", "")
+            text = str(item).strip()
+            if text:
+                lines.append(text[:2000])
+    return lines
+
+
+def _text_lyrics(lines: list[str]) -> list[dict[str, Any]]:
+    return [
+        {"bpm": 0.0, "start time": 0.0, "end time": 0.0, "words": [], "text": text}
+        for text in lines
+    ]
+
+
+# NOTE: registered before ``/scribbles/{scribble_id}`` so the literal path wins.
+@app.post("/scribbles/text")
+def create_text_scribble(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    """Create a text-only scribble (no audio) from ``{name, lines}``."""
+    name = _clean_name(body.get("name"), "Text scribble")
+    lines = _clean_text_lines(body.get("lines"))
+    scribble_id = f"sb-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
+    take_dir = _take_dir(SCRIBBLES_SESSION_ID, scribble_id)
+    take_dir.mkdir(parents=True, exist_ok=True)
+    now = _now()
+    meta = {
+        "session_id": SCRIBBLES_SESSION_ID,
+        "take_id": scribble_id,
+        "index": _next_index(SCRIBBLES_SESSION_ID),
+        "name": name,
+        "bookmarked": False,
+        "processed": True,
+        "status": "done",
+        "kind": "text",
+        "error": None,
+        "created_at": now,
+        "finished_at": now,
+    }
+    _write_json(take_dir / "meta.json", meta)
+    _write_json(take_dir / "result.json", {"kind": "text", "lyrics": _text_lyrics(lines)})
+    _touch_session(SCRIBBLES_SESSION_ID)
+    return meta
+
+
 @app.post("/scribbles/{scribble_id}")
 def create_scribble(
     scribble_id: str,
@@ -1149,6 +1204,23 @@ def process_scribble(
 def get_scribble(scribble_id: str) -> dict[str, Any]:
     """Return one scribble's metadata plus its result, when available."""
     return get_take(SCRIBBLES_SESSION_ID, scribble_id)
+
+
+@app.put("/scribbles/{scribble_id}/text")
+def update_text_scribble(
+    scribble_id: str, body: dict[str, Any] = Body(default={})
+) -> dict[str, Any]:
+    """Replace a text scribble's lines."""
+    take_dir = _take_dir(SCRIBBLES_SESSION_ID, scribble_id)
+    meta = _read_json(take_dir / "meta.json")
+    if not isinstance(meta, dict):
+        raise HTTPException(status_code=404, detail="Unknown scribble.")
+    if meta.get("kind") != "text":
+        raise HTTPException(status_code=400, detail="Not a text scribble.")
+    lines = _clean_text_lines(body.get("lines"))
+    _write_json(take_dir / "result.json", {"kind": "text", "lyrics": _text_lyrics(lines)})
+    _touch_session(SCRIBBLES_SESSION_ID)
+    return {"lyrics": _text_lyrics(lines)}
 
 
 @app.patch("/scribbles/{scribble_id}")

@@ -1431,6 +1431,46 @@ class ScribbleApiTests(unittest.TestCase):
         self.assertEqual(updated.status_code, 200, updated.text)
         self.assertEqual(updated.json()["line_count"], 1)
 
+    def test_text_scribble(self):
+        created = self.client.post(
+            "/scribbles/text",
+            json={"name": "Words", "lines": ["first line", "second"]},
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        meta = created.json()
+        self.assertEqual(meta["kind"], "text")
+        self.assertEqual(meta["status"], "done")
+
+        listed = self.client.get("/scribbles").json()["scribbles"]
+        self.assertEqual([item["take_id"] for item in listed], [meta["take_id"]])
+        self.assertEqual(listed[0]["kind"], "text")
+
+        got = self.client.get(f"/scribbles/{meta['take_id']}").json()
+        self.assertEqual(
+            [line["text"] for line in got["result"]["lyrics"]], ["first line", "second"]
+        )
+
+        updated = self.client.put(
+            f"/scribbles/{meta['take_id']}/text", json={"lines": ["only one"]}
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual([line["text"] for line in updated.json()["lyrics"]], ["only one"])
+
+        # A text scribble has no audio.
+        self.assertEqual(
+            self.client.get(f"/scribbles/{meta['take_id']}/audio/vocals").status_code, 404
+        )
+
+        # ...and the text endpoint refuses audio scribbles.
+        self.client.post(
+            "/scribbles/raw2",
+            params={"process": "false"},
+            files={"file": ("r.webm", b"x", "audio/webm")},
+        )
+        self.assertEqual(
+            self.client.put("/scribbles/raw2/text", json={"lines": ["x"]}).status_code, 400
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
