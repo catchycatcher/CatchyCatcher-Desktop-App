@@ -118,7 +118,6 @@ Configuration is via environment variables:
 
 from __future__ import annotations
 
-import asyncio
 import difflib
 import hashlib
 import json
@@ -132,9 +131,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    Body,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 import pipeline
 import scrapbook
@@ -258,75 +267,71 @@ async def log_request(request: Request, call_next):
 
 
 # ---------------------------------------------------------------------------
-# Live updates (Server-Sent Events)
+# Shared microphone (a WebSocket relay)
 # ---------------------------------------------------------------------------
 #
-# Everyone connected to the same server subscribes to ``/events``. Any
-# successful write (a take, a scribble, a scrapbook) broadcasts a small "change"
-# event, and the clients refetch what they show, so two people see each other's
-# work without reloading.
+# A phone can share its microphone with a computer on the same server: the phone
+# connects as the ``sharer`` and streams raw PCM frames; computers connect as
+# ``listeners`` and receive them (plus presence + clock-sync control messages).
+# The audio itself is timestamped by the phone, so the computer can cut takes at
+# the exact moment a key was pressed, no matter how delayed the stream is.
 
-_CHANGE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-_event_subscribers: set[asyncio.Queue] = set()
-
-
-def _session_from_path(path: str) -> str | None:
-    """The session a request path targets, if any (``/sessions/<id>/...``)."""
-    parts = path.strip("/").split("/")
-    if len(parts) >= 2 and parts[0] == "sessions":
-        return sanitize_id(parts[1])
-    return None
+_mic_rooms: dict[str, dict] = {}
 
 
-async def _broadcast_change(request: Request) -> None:
-    path = request.url.path
-    event = {
-        "method": request.method,
-        "path": path,
-        "session_id": _session_from_path(path),
-    }
-    for queue in list(_event_subscribers):
+def _mic_room(room: str) -> dict:
+    return _mic_rooms.setdefault(room, {"sharer": None, "listeners": set()})
+
+
+async def _mic_send(targets, *, data: bytes | None = None, json: Any = None) -> None:
+    for target in list(targets):
         try:
-            queue.put_nowait(event)
-        except Exception:  # pragma: no cover - a full queue just drops the event
-            pass
+            if data is not None:
+                await target.send_bytes(data)
+            else:
+                await target.send_json(json)
+        except Exception:
+            targets.discard(target)
 
 
-@app.middleware("http")
-async def broadcast_changes(request: Request, call_next):
-    """Tell subscribers about any write that succeeded."""
-    response = await call_next(request)
-    if request.method in _CHANGE_METHODS and response.status_code < 400:
-        await _broadcast_change(request)
-    return response
-
-
-@app.get("/events")
-async def events(request: Request) -> StreamingResponse:
-    """Stream a ``change`` event whenever something on the server is written."""
-    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
-    _event_subscribers.add(queue)
-
-    async def stream():
-        try:
-            yield "event: hello\ndata: {}\n\n"
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    yield ": keep-alive\n\n"
-                    continue
-                yield f"event: change\ndata: {json.dumps(event)}\n\n"
-        finally:
-            _event_subscribers.discard(queue)
-
-    return StreamingResponse(
-        stream(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+@app.websocket("/mic/{room}")
+async def mic_relay(websocket: WebSocket, room: str) -> None:
+    """Relay microphone audio from a sharer to everyone listening in ``room``."""
+    await websocket.accept()
+    role = websocket.query_params.get("role", "listener")
+    state = _mic_room(room)
+    if role == "sharer":
+        state["sharer"] = websocket
+        await _mic_send(state["listeners"], json={"type": "sharer", "present": True})
+    else:
+        state["listeners"].add(websocket)
+        await websocket.send_json({"type": "sharer", "present": state["sharer"] is not None})
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            data = message.get("bytes")
+            text = message.get("text")
+            if data is not None:
+                if role == "sharer":
+                    await _mic_send(state["listeners"], data=data)
+            elif text is not None:
+                # Control/ping messages: listeners ↔ sharer.
+                if role == "sharer":
+                    await _mic_send(state["listeners"], json=json.loads(text))
+                elif state["sharer"] is not None:
+                    await _mic_send({state["sharer"]}, json=json.loads(text))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if role == "sharer":
+            state["sharer"] = None
+            await _mic_send(state["listeners"], json={"type": "sharer", "present": False})
+        else:
+            state["listeners"].discard(websocket)
+        if state["sharer"] is None and not state["listeners"]:
+            _mic_rooms.pop(room, None)
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +642,7 @@ def root() -> dict[str, Any]:
     return {
         "name": "Catchy Catcher Processing Engine",
         "endpoints": [
-            "GET /events",
+            "WS /mic/{room} (shared microphone relay)",
             "POST /sessions/{session_id}/takes/{take_id}",
             "POST /sessions/{session_id}/takes/{take_id}/process",
             "GET /sessions",

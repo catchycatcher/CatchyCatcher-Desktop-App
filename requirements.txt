@@ -25,6 +25,8 @@ librosa
 # Server
 fastapi
 uvicorn
+# WebSocket support for the shared-microphone relay.
+websockets
 python-multipart
 
 # Share tunnel for the web frontend. Pinned below 6 on purpose: gradio 6

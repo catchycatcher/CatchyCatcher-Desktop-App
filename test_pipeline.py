@@ -865,24 +865,6 @@ class ApiTests(unittest.TestCase):
 
         return fake
 
-    def test_change_broadcast_reaches_subscribers(self):
-        import asyncio
-
-        class FakeRequest:
-            method = "POST"
-
-            class url:  # noqa: N801 - stand-in for Starlette's request.url
-                path = "/sessions/x"
-
-        queue: asyncio.Queue = asyncio.Queue()
-        server._event_subscribers.add(queue)
-        try:
-            asyncio.run(server._broadcast_change(FakeRequest()))
-            event = queue.get_nowait()
-            self.assertEqual(event["path"], "/sessions/x")
-        finally:
-            server._event_subscribers.discard(queue)
-
     def test_requests_are_logged(self):
         with self.assertLogs("catchycatcher.requests", level="INFO") as captured:
             response = self.client.get("/health")
