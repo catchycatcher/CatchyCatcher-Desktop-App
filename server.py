@@ -270,8 +270,21 @@ _CHANGE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _event_subscribers: set[asyncio.Queue] = set()
 
 
+def _session_from_path(path: str) -> str | None:
+    """The session a request path targets, if any (``/sessions/<id>/...``)."""
+    parts = path.strip("/").split("/")
+    if len(parts) >= 2 and parts[0] == "sessions":
+        return sanitize_id(parts[1])
+    return None
+
+
 async def _broadcast_change(request: Request) -> None:
-    event = {"method": request.method, "path": request.url.path}
+    path = request.url.path
+    event = {
+        "method": request.method,
+        "path": path,
+        "session_id": _session_from_path(path),
+    }
     for queue in list(_event_subscribers):
         try:
             queue.put_nowait(event)
