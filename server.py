@@ -1358,10 +1358,18 @@ def _normalize_lines(lines: Any) -> list[dict[str, Any]]:
     if not isinstance(lines, list):
         return []
     normalized: list[dict[str, Any]] = []
+    seen_instances: set[str] = set()
     for entry in lines:
         if isinstance(entry, dict) and isinstance(entry.get("group"), dict):
             group = _normalize_group(entry)
             if group:
+                # A split section (two entries sharing an instance) would break the
+                # client; give the later one its own instance.
+                instance = group["group"]["instance"]
+                if instance in seen_instances:
+                    instance = f"{group['group']['id']}-{os.urandom(3).hex()}"
+                    group["group"]["instance"] = instance
+                seen_instances.add(instance)
                 normalized.append(group)
             continue
         line = _normalize_line_ref(entry)

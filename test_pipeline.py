@@ -1364,6 +1364,17 @@ class ApiTests(unittest.TestCase):
         # line_count counts the flattened lines.
         self.assertEqual(body["line_count"], 3)
 
+    def test_duplicate_section_instances_are_separated(self):
+        line = {"session_id": "s", "take_id": "t", "line_index": 0, "data": {}}
+        lines = server._normalize_lines(
+            [
+                {"group": {"id": "g", "type": "chorus", "instance": "same"}, "lines": [line]},
+                {"group": {"id": "g", "type": "chorus", "instance": "same"}, "lines": [line]},
+            ]
+        )
+        instances = [entry["group"]["instance"] for entry in lines]
+        self.assertEqual(len(set(instances)), 2)
+
     def test_scrapbook_signature_ignores_groups(self):
         bare = [{"session_id": "s", "take_id": "t", "line_index": 0, "data": {}}]
         grouped = [
