@@ -140,17 +140,44 @@ def _line_speeds(entries: list[dict[str, Any]]) -> list[float]:
     return [max(MIN_SPEED, min(MAX_SPEED, speed)) for speed in speeds]
 
 
+#: If the two candidate gaps differ by this factor (either way), keep the
+#: earlier clip's pause instead of blending them.
+GAP_DIVERGENCE = 1.5
+
+
 def _gap_between(
     current: dict[str, Any], following: dict[str, Any], current_speed: float, next_speed: float
 ) -> float:
-    """Blend the pauses around two adjacent lines, scaled by their new speeds."""
-    gaps: list[float] = []
-    if current.get("gap_after") is not None:
-        gaps.append(float(current["gap_after"]) / current_speed)
-    if following.get("gap_before") is not None:
-        gaps.append(float(following["gap_before"]) / next_speed)
+    """Choose the silence between two adjacent lines, scaled by their new speeds.
 
-    gap = sum(gaps) / len(gaps) if gaps else DEFAULT_GAP_SECONDS / current_speed
+    The earlier line's trailing pause (``gap_after``) and the later line's
+    leading pause (``gap_before``) are the candidates. When they are close they
+    are averaged; when one is at least ``GAP_DIVERGENCE`` times the other, the
+    **earlier line's** pause wins, so a big breath before or after a phrase is not
+    diluted by the other side.
+    """
+    earlier = (
+        float(current["gap_after"]) / current_speed
+        if current.get("gap_after") is not None
+        else None
+    )
+    later = (
+        float(following["gap_before"]) / next_speed
+        if following.get("gap_before") is not None
+        else None
+    )
+
+    if earlier is None and later is None:
+        gap = DEFAULT_GAP_SECONDS / current_speed
+    elif earlier is None:
+        gap = later
+    elif later is None:
+        gap = earlier
+    elif max(earlier, later) >= GAP_DIVERGENCE * min(earlier, later):
+        gap = earlier
+    else:
+        gap = (earlier + later) / 2
+
     return max(MIN_GAP_SECONDS, min(MAX_GAP_SECONDS, gap))
 
 

@@ -325,10 +325,11 @@ There is **no global BPM**. Each line keeps its recorded tempo; only the
   up, half slow down, no overall shift), clamped, and each line is cut from its
   isolated vocals with pitch-preserving `atempo`.
 
-The gap between two lines is the mean of the pause that followed the first and
-the pause that preceded the second in their own journals, each divided by that
-line's new speed (fallback when a line was at the edge of its journal), and is
-clamped to a sane range.
+The gap between two lines takes the earlier line's trailing pause and the later
+line's leading pause (each divided by that line's new speed), and averages them —
+unless one is at least 1.5x the other, in which case the **earlier line's** pause
+wins so a real breath is not diluted. It falls back to a default when a line was
+at the edge of its journal, and is clamped to a sane range.
 
 ### Example
 

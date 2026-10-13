@@ -744,6 +744,24 @@ class ScrapbookTimelineTests(unittest.TestCase):
         self.assertEqual(timeline[0]["source"]["line_index"], 0)
         self.assertEqual(timeline[1]["source"]["line_index"], 1)
 
+    def test_gap_prefers_the_earlier_pause_when_they_diverge(self):
+        entries = [
+            {"bpm": 100.0, "take_bpm": 100.0, "start": 0.0, "end": 1.0, "words": [], "gap_after": 0.5, "next_bpm": 100.0},
+            {"bpm": 100.0, "take_bpm": 100.0, "start": 0.0, "end": 1.0, "words": [], "gap_before": 1.2, "prev_bpm": 100.0},
+        ]
+        _timeline, gaps = scrapbook.build_timeline(entries)
+        # 1.2 / 0.5 = 2.4 >= 1.5, so the earlier clip's 0.5s pause wins.
+        self.assertAlmostEqual(gaps[0], 0.5, places=3)
+
+    def test_gap_blends_when_the_pauses_are_close(self):
+        entries = [
+            {"bpm": 100.0, "take_bpm": 100.0, "start": 0.0, "end": 1.0, "words": [], "gap_after": 0.5, "next_bpm": 100.0},
+            {"bpm": 100.0, "take_bpm": 100.0, "start": 0.0, "end": 1.0, "words": [], "gap_before": 0.7, "prev_bpm": 100.0},
+        ]
+        _timeline, gaps = scrapbook.build_timeline(entries)
+        # 0.7 / 0.5 = 1.4 < 1.5, so the two are averaged.
+        self.assertAlmostEqual(gaps[0], 0.6, places=3)
+
     def test_gap_scales_with_the_new_speed(self):
         entries = [
             {"bpm": 100.0, "start": 0.0, "end": 1.0, "words": [], "gap_after": 0.5, "next_bpm": 200.0},
