@@ -605,8 +605,8 @@ class ProcessSongSessionFlowTests(unittest.TestCase):
                 self.input_path, output_dir=self.temp_dir
             )
 
-        # Top-level keys exactly match the spec.
-        self.assertEqual(set(result), {"vocals", "background", "lyrics"})
+        # Top-level keys match the spec (plus the whole-take tempo).
+        self.assertEqual(set(result), {"vocals", "background", "bpm", "lyrics"})
         self.assertTrue(result["vocals"].endswith("vocals.m4a"))
         self.assertTrue(result["background"].endswith("background.m4a"))
 
@@ -703,6 +703,29 @@ class ScrapbookTimelineTests(unittest.TestCase):
         timeline, _gaps = scrapbook.build_timeline(entries)
         logs = sorted(math.log(line["speed"]) for line in timeline)
         self.assertAlmostEqual(logs[len(logs) // 2], 0.0, places=3)
+
+    def test_same_bpm_is_always_an_option(self):
+        # Two takes at very different tempos, no neighbour info: the take-ratio
+        # baseline is 1.6, but same-BPM (1.0) is still a candidate and wins as
+        # the only option, so B is played at A's tempo.
+        entries = [
+            {"bpm": 100.0, "take_bpm": 100.0, "start": 0.0, "end": 1.0, "words": []},
+            {"bpm": 160.0, "take_bpm": 160.0, "start": 0.0, "end": 1.0, "words": []},
+        ]
+        timeline, _gaps = scrapbook.build_timeline(entries)
+        self.assertAlmostEqual(timeline[0]["speed"], 1.265, places=2)
+        self.assertAlmostEqual(timeline[1]["speed"], 0.790, places=2)
+
+    def test_baseline_prefers_the_source_take_ratio(self):
+        # A's take is 100, B's take is 160 -> baseline 1.6. A's after-ratio of
+        # 2.0 is closer to 1.6 than same-BPM (1.0), so the expectation is used.
+        entries = [
+            {"bpm": 100.0, "take_bpm": 100.0, "next_bpm": 200.0, "start": 0.0, "end": 1.0, "words": []},
+            {"bpm": 160.0, "take_bpm": 160.0, "start": 0.0, "end": 1.0, "words": []},
+        ]
+        timeline, _gaps = scrapbook.build_timeline(entries)
+        self.assertAlmostEqual(timeline[0]["speed"], 0.89, places=2)
+        self.assertAlmostEqual(timeline[1]["speed"], 1.12, places=2)
 
     def test_single_line_plays_at_its_tempo(self):
         entries = [{"bpm": 90.0, "start": 1.0, "end": 2.0, "words": []}]

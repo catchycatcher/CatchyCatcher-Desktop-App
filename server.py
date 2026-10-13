@@ -899,8 +899,10 @@ def _line_data(ref: dict[str, Any]) -> dict[str, Any]:
 
     previous = lyrics[index - 1] if index > 0 else None
     following = lyrics[index + 1] if index + 1 < len(lyrics) else None
+    take_bpm = result.get("bpm") if isinstance(result, dict) else None
     return {
         "bpm": float(line.get("bpm") or 120.0),
+        "take_bpm": float(take_bpm) if take_bpm else None,
         "prev_bpm": float(previous.get("bpm") or 0.0) if previous else None,
         "next_bpm": float(following.get("bpm") or 0.0) if following else None,
         "start": float(line["start time"]),

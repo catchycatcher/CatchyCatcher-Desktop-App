@@ -6,6 +6,7 @@ JSON-compatible payload described in ``SYSTEM_INSTRUCTIONS.md``::
     {
       "vocals": "path/to/vocals.m4a",
       "background": "path/to/background.m4a",
+      "bpm": 118.0,
       "lyrics": [
         {
           "bpm": 120.0,
@@ -21,7 +22,8 @@ JSON-compatible payload described in ``SYSTEM_INSTRUCTIONS.md``::
 
 Each word carries its exact ``start``/``end`` (seconds) as well as ``length``,
 so a client can highlight words as the audio plays; the spec's minimum fields
-are unchanged.
+are unchanged. The top-level ``bpm`` is the tempo of the whole take (each lyric
+line also carries its own ``bpm``).
 
 The heavy dependencies (torch, torchaudio, demucs, whisperx, librosa) are
 imported lazily so the API can start and report health on a machine where they
@@ -954,9 +956,10 @@ def process_song_session(
     grouped_lines = group_words_into_lines(all_words, silence_threshold)
 
     # ------------------------------------------------------------------
-    # 4. Per-line BPM calculation (librosa)
+    # 4. BPM: once for the whole take, and once per line (librosa)
     # ------------------------------------------------------------------
     vocal_np = vocals_tensor.mean(dim=0).cpu().numpy()
+    take_bpm = estimate_line_bpm(vocal_np, sample_rate, start_bpm)
 
     lyrics_output: list[dict[str, Any]] = []
     for line_words in grouped_lines:
@@ -987,6 +990,7 @@ def process_song_session(
     return {
         "vocals": vocals_m4a,
         "background": background_m4a,
+        "bpm": take_bpm,
         "lyrics": lyrics_output,
     }
 

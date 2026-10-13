@@ -256,19 +256,23 @@ Response body:
 {
   "vocals": "/abs/path/sessions/song1/takes/3/vocals.m4a",
   "background": "/abs/path/sessions/song1/takes/3/background.m4a",
+  "bpm": 118.0,
   "lyrics": [
     {
       "bpm": 120.0,
       "start time": 12.45,
       "end time": 15.82,
       "words": [
-        { "word": "hello", "length": 0.37 },
-        { "word": "world", "length": 0.33 }
+        { "word": "hello", "start": 12.45, "end": 12.82, "length": 0.37 },
+        { "word": "world", "start": 12.82, "end": 13.15, "length": 0.33 }
       ]
     }
   ]
 }
 ```
+
+The top-level `bpm` is the tempo of the whole take; each lyric line also carries
+its own `bpm` and its words carry exact `start`/`end` times.
 
 The sanitised ids are echoed in the `X-Session-Id` and `X-Take-Id` response
 headers.
@@ -308,13 +312,18 @@ cached render.
 | `GET` | `/scrapbooks/{scrapbook_id}/audio` | Stream the rendered mix (`audio/mp4`). |
 
 There is **no global BPM**. Each line keeps its recorded tempo; only the
-*relative* tempo between neighbours is adjusted. Every line knows two expected
-ratios from its own journal — to the line that followed it (`after`) and to the
-line that preceded it (`before`). When line B is placed after line A, the speed
-applied to B is whichever of A's `after` / B's `before` needs the smallest change
-from B's own tempo. All the speeds are then normalised so the median log-speed is
-zero (half speed up, half slow down, no overall shift), then each line is
-cut from its isolated vocals with pitch-preserving `atempo`.
+*relative* tempo between neighbours is adjusted.
+
+- Every line knows two expected ratios from its own journal — to the line that
+  followed it (`after`) and to the line that preceded it (`before`) — and the
+  tempo of the whole take it came from (the pipeline runs BPM detection on the
+  full take as well as each line).
+- When line B follows line A, the **baseline** is the ratio of their source
+  takes' tempos. The candidate ratios are A's `after`, B's `before`, and **same
+  BPM as A** (always available); the one closest to the baseline wins.
+- All the speeds are then normalised so the median log-speed is zero (half speed
+  up, half slow down, no overall shift), clamped, and each line is cut from its
+  isolated vocals with pitch-preserving `atempo`.
 
 The gap between two lines is the mean of the pause that followed the first and
 the pause that preceded the second in their own journals, each divided by that

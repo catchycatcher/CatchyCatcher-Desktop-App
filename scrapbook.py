@@ -6,11 +6,12 @@ tempo between neighbouring lines is adjusted.
 
 For each line we know two expected ratios from its own journal — how its tempo
 related to the line that followed it (``after``) and to the line that preceded it
-(``before``). When line B is placed after line A, the ratio used for B is
-whichever of A's ``after`` / B's ``before`` needs the smallest change from B
-playing at its own recorded tempo (relative to A's already-adjusted tempo). Once
-every line has a speed, they are normalised so the median log-speed is zero — so
-half the lines speed up and half slow down, with no overall shift.
+(``before``) — and the tempo of the whole take it came from. When line B is
+placed after line A, the *baseline* is the ratio of their source takes' tempos,
+and the ratio applied to B is whichever of ``after``, ``before`` or **same BPM as
+A** sits closest to that baseline. Once every line has a speed, they are
+normalised so the median log-speed is zero — so half the lines speed up and half
+slow down, with no overall shift.
 
 The module is deliberately free of FastAPI/state: callers pass in the resolved
 line data and the output directory, which keeps the maths unit-testable without
@@ -87,21 +88,38 @@ def _source_words(entry: dict[str, Any], line_start: float) -> list[tuple[str, f
 def _line_speeds(entries: list[dict[str, Any]]) -> list[float]:
     """Per-line playback speed factors (1.0 = played at its recorded tempo).
 
+    The *baseline* for a pair of neighbours is the ratio of the tempos of the
+    takes they were sourced from (so two clips from the same-tempo takes are
+    expected to line up), rather than a scale of 1. The candidate ratios are the
+    previous line's ``after`` expectation, this line's ``before`` expectation,
+    and **same BPM as the previous line** (always available); the one closest to
+    the baseline wins.
+
     ``speed > 1`` plays the line faster (shorter); the median log-speed is
     normalised to zero so there is no overall tempo shift.
     """
     speeds: list[float] = []
     played: float | None = None
+    previous_take_bpm: float | None = None
 
     for index, entry in enumerate(entries):
         bpm = float(entry.get("bpm") or 120.0)
+        take_bpm = float(entry.get("take_bpm") or bpm)
+
         if played is None:
             speeds.append(1.0)
             played = bpm
+            previous_take_bpm = take_bpm
             continue
 
-        natural = bpm / played  # ratio that leaves B unstretched
-        candidates: list[float] = []
+        # Baseline: how the two source takes relate in tempo.
+        if previous_take_bpm:
+            baseline = take_bpm / previous_take_bpm
+        else:
+            baseline = bpm / played
+
+        # Same-BPM is always an option; the neighbours' expectations add more.
+        candidates = [1.0]
         after = entries[index - 1].get("after")
         before = entry.get("before")
         if after:
@@ -109,13 +127,10 @@ def _line_speeds(entries: list[dict[str, Any]]) -> list[float]:
         if before:
             candidates.append(float(before))
 
-        if candidates:
-            chosen = min(candidates, key=lambda ratio: abs(math.log(ratio) - math.log(natural)))
-        else:
-            chosen = natural
-
+        chosen = min(candidates, key=lambda ratio: abs(math.log(ratio) - math.log(baseline)))
         played = played * chosen
         speeds.append(played / bpm)
+        previous_take_bpm = take_bpm
 
     if speeds:
         logs = [math.log(speed) for speed in speeds]
