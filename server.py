@@ -1422,9 +1422,11 @@ def _scrapbook_entry(ref: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
-def _scrapbook_signature(lines: list[dict[str, Any]]) -> str:
+def _scrapbook_signature(lines: list[dict[str, Any]], target_bpm: Any = None) -> str:
     # Grouping is visual: the mix only depends on the flattened line sequence.
-    payload = json.dumps({"lines": _expand_lines(lines)}, sort_keys=True)
+    payload = json.dumps(
+        {"lines": _expand_lines(lines), "target_bpm": target_bpm}, sort_keys=True
+    )
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
@@ -1440,6 +1442,7 @@ def _scrapbook_summary(meta: dict[str, Any]) -> dict[str, Any]:
         "scrapbook_id": meta.get("scrapbook_id"),
         "name": meta.get("name"),
         "line_count": len(_expand_lines(meta.get("lines") or [])),
+        "target_bpm": meta.get("target_bpm"),
         "created_at": meta.get("created_at"),
         "updated_at": meta.get("updated_at"),
         "rendered": bool(meta.get("render")),
@@ -1489,7 +1492,8 @@ def _render_scrapbook(session_id: str, meta: dict[str, Any]) -> dict[str, Any]:
     sid = str(meta["scrapbook_id"])
     lines = meta.get("lines") or []
     expanded = _expand_lines(lines)
-    signature = _scrapbook_signature(lines)
+    target_bpm = meta.get("target_bpm")
+    signature = _scrapbook_signature(lines, target_bpm)
     book_dir = _scrapbook_dir(session_id, sid)
     mix = book_dir / "mix.m4a"
 
@@ -1502,7 +1506,7 @@ def _render_scrapbook(session_id: str, meta: dict[str, Any]) -> dict[str, Any]:
 
     entries = [_scrapbook_entry(ref) for ref in expanded]
     with PROCESS_LOCK:
-        timeline, gaps, _mix = scrapbook.render(entries, book_dir)
+        timeline, gaps, _mix = scrapbook.render(entries, book_dir, target_bpm=target_bpm)
 
     render = {
         "signature": signature,
@@ -1578,12 +1582,19 @@ def get_scrapbook(session_id: str, scrapbook_id: str) -> dict[str, Any]:
 def update_scrapbook(
     session_id: str, scrapbook_id: str, body: dict[str, Any] = Body(default={})
 ) -> dict[str, Any]:
-    """Update ``name`` and/or ``lines``. Edits invalidate the render."""
+    """Update ``name``, ``lines`` and/or ``target_bpm``. Edits invalidate the render."""
     meta = _load_scrapbook(session_id, scrapbook_id)
     if "name" in body:
         meta["name"] = _clean_name(body.get("name"), meta.get("name") or "Scrapbook")
     if "lines" in body:
         meta["lines"] = _normalize_lines(body.get("lines"))
+    if "target_bpm" in body:
+        target = body.get("target_bpm")
+        try:
+            target = float(target) if target else None
+        except (TypeError, ValueError):
+            target = None
+        meta["target_bpm"] = target if target and 20 <= target <= 300 else None
 
     meta["updated_at"] = _now()
     _write_json(_scrapbook_meta_path(session_id, scrapbook_id), meta)
