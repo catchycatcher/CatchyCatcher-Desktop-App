@@ -1321,6 +1321,48 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.delete(f"/sessions/src/scrapbooks/{sid}").status_code, 200)
         self.assertEqual(self.client.get(f"/sessions/src/scrapbooks/{sid}").status_code, 404)
 
+    def test_scrapbook_section_groups_persist(self):
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            self.client.post(
+                "/sessions/grp/takes/t", files={"file": ("t.m4a", b"x", "audio/mp4")}
+            )
+        sid = self.client.post(
+            "/sessions/grp/scrapbooks",
+            json={
+                "name": "G",
+                "lines": [
+                    {
+                        "session_id": "grp",
+                        "take_id": "t",
+                        "line_index": 0,
+                        "group": {"id": "g1", "type": "chorus"},
+                    },
+                    {"session_id": "grp", "take_id": "t", "line_index": 0},
+                    {
+                        "session_id": "grp",
+                        "take_id": "t",
+                        "line_index": 0,
+                        "group": {"id": "g2", "type": "bogus"},
+                    },
+                ],
+            },
+        ).json()["scrapbook_id"]
+
+        lines = self.client.get(f"/sessions/grp/scrapbooks/{sid}").json()["lines"]
+        self.assertEqual(lines[0]["group"], {"id": "g1", "type": "chorus"})
+        self.assertNotIn("group", lines[1])
+        # An unknown section type is dropped.
+        self.assertNotIn("group", lines[2])
+
+    def test_scrapbook_signature_ignores_groups(self):
+        base = [{"session_id": "s", "take_id": "t", "line_index": 0, "data": {}}]
+        grouped = [{**base[0], "group": {"id": "g", "type": "verse"}}]
+        self.assertEqual(
+            server._scrapbook_signature(base), server._scrapbook_signature(grouped)
+        )
+
 
 class ScribbleApiTests(unittest.TestCase):
     """Scribbles: a journal shared across every session, stored in ``scribbles``."""

@@ -1286,6 +1286,10 @@ def _scrapbook_meta_path(session_id: str, scrapbook_id: str) -> Path:
     return _scrapbook_dir(session_id, scrapbook_id) / "scrapbook.json"
 
 
+#: Section types a scrapbook line can be grouped under (UI colour-coding only).
+SECTION_TYPES = ("chorus", "verse", "bridge", "other")
+
+
 def _normalize_lines(lines: Any) -> list[dict[str, Any]]:
     """Validate scrapbook lines, snapshotting each one as it is added.
 
@@ -1319,9 +1323,20 @@ def _normalize_lines(lines: Any) -> list[dict[str, Any]]:
             except HTTPException:
                 continue
             data = {key: value for key, value in resolved.items() if key != "vocals"}
-        normalized.append(
-            {"session_id": sid, "take_id": tid, "line_index": line_index, "data": data}
-        )
+        entry: dict[str, Any] = {
+            "session_id": sid,
+            "take_id": tid,
+            "line_index": line_index,
+            "data": data,
+        }
+        # Optional section grouping (chorus/verse/bridge/other). Purely visual, so
+        # it is carried through untouched and kept out of the render signature.
+        group = ref.get("group")
+        if isinstance(group, dict) and group.get("type") in SECTION_TYPES:
+            group_id = str(group.get("id", "")).strip()[:64]
+            if group_id:
+                entry["group"] = {"id": group_id, "type": str(group["type"])}
+        normalized.append(entry)
     return normalized
 
 
@@ -1344,7 +1359,11 @@ def _scrapbook_entry(ref: dict[str, Any]) -> dict[str, Any]:
 
 
 def _scrapbook_signature(lines: list[dict[str, Any]]) -> str:
-    payload = json.dumps({"lines": lines}, sort_keys=True)
+    # Section groups are visual only, so they must not invalidate a cached render.
+    payload = json.dumps(
+        {"lines": [{key: value for key, value in ref.items() if key != "group"} for ref in lines]},
+        sort_keys=True,
+    )
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
