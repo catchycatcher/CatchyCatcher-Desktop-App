@@ -428,6 +428,29 @@ class ShareCodeTests(unittest.TestCase):
             expected = label.lower().lstrip("0") or "0"
             self.assertEqual(self.frontend_decode(code), expected, label)
 
+    def test_format_share_code_groups_into_fours(self):
+        # length -> expected grouping (the tail is never a lone 1 or 2)
+        cases = {
+            4: "abcd",
+            5: "abcde",
+            6: "abc-def",
+            7: "abcd-efg",
+            8: "abcd-efgh",
+            9: "abcd-efghi",
+            10: "abcd-efg-hij",
+            11: "abcd-efgh-ijk",
+            12: "abcd-efgh-ijkl",
+            13: "abcd-efgh-ijklm",
+        }
+        for length, expected in cases.items():
+            self.assertEqual(share_code.format_share_code("abcdefghijklm"[:length]), expected)
+
+    def test_format_share_code_strips_separators_and_is_idempotent(self):
+        self.assertEqual(share_code.format_share_code("ab-cd ef"), "abc-def")
+        once = share_code.format_share_code("abcdefghij")
+        self.assertEqual(share_code.format_share_code(once), once)
+        self.assertEqual(once, "abcd-efg-hij")
+
 
 # ---------------------------------------------------------------------------
 # End-to-end orchestration with the heavy stack stubbed out
@@ -687,6 +710,27 @@ class ScrapbookTimelineTests(unittest.TestCase):
         self.assertEqual(gaps, [])
         self.assertAlmostEqual(timeline[0]["start time"], 0.0, places=3)
         self.assertAlmostEqual(timeline[0]["end time"], 0.75, places=3)
+
+    def test_timeline_tags_each_line_with_its_source(self):
+        entries = [
+            {
+                "bpm": 100.0,
+                "start": 0.0,
+                "end": 1.0,
+                "words": [],
+                "source": {"session_id": "s", "take_id": "t", "line_index": 0},
+            },
+            {
+                "bpm": 100.0,
+                "start": 2.0,
+                "end": 3.0,
+                "words": [],
+                "source": {"session_id": "s", "take_id": "t", "line_index": 1},
+            },
+        ]
+        timeline, _gaps = scrapbook.build_timeline(entries, 100.0)
+        self.assertEqual(timeline[0]["source"]["line_index"], 0)
+        self.assertEqual(timeline[1]["source"]["line_index"], 1)
 
     def test_fallback_gap_when_no_source_pause_is_known(self):
         entries = [

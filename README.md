@@ -132,10 +132,14 @@ Have https://catchycatcher.github.io open, then enter the share code below.
 ==========================================================
         YOUR SHARE CODE
 
-        zz4k1q
+        zz4-k1q
 
 ==========================================================
 ```
+
+The code is printed grouped in fours (with a tidy tail, so there is never a
+lone character). The hyphens are cosmetic — the frontend accepts the code with
+or without them.
 
 Pass `--verbose` to get the full startup detail instead (bind address, docs,
 public tunnel url, expiry notice and uvicorn logs):
@@ -150,7 +154,7 @@ public tunnel url, expiry notice and uvicorn logs):
 ================================================================
 ...
 Running on public URL: https://<hex>.gradio.live
-Share code (base-62): <code>
+Share code (base-62): <grouped-code>
 ```
 
 Useful flags:

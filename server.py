@@ -957,7 +957,11 @@ def _render_scrapbook(meta: dict[str, Any]) -> dict[str, Any]:
     if not lines:
         raise HTTPException(status_code=400, detail="Add at least one line before rendering.")
 
-    entries = [_line_data(ref) for ref in lines]
+    entries = []
+    for ref in lines:
+        entry = _line_data(ref)
+        entry["source"] = ref
+        entries.append(entry)
     with PROCESS_LOCK:
         timeline, gaps, _mix = scrapbook.render(entries, bpm, _scrapbook_dir(sid))
 
@@ -969,9 +973,14 @@ def _render_scrapbook(meta: dict[str, Any]) -> dict[str, Any]:
         "gaps": gaps,
         "rendered_at": _now(),
     }
-    meta["render"] = render
-    meta["updated_at"] = _now()
-    _write_json(_scrapbook_meta_path(sid), meta)
+    # Merge into the *current* file: an edit may have landed while we rendered,
+    # and its lines must not be overwritten by our older snapshot.
+    current = _read_json(_scrapbook_meta_path(sid))
+    if not isinstance(current, dict):
+        current = meta
+    current["render"] = render
+    current["updated_at"] = _now()
+    _write_json(_scrapbook_meta_path(sid), current)
     return render
 
 

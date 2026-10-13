@@ -11,7 +11,7 @@ from urllib.parse import urlparse, urlunparse
 
 # `share_code` (and its base62 alphabet, which must match the frontend's decoder)
 # lives in a gradio-free module so it can be unit-tested on its own.
-from share_code import share_code
+from share_code import format_share_code, share_code
 
 try:
     # Import necessary Gradio components carefully to avoid heavy UI imports
@@ -195,7 +195,7 @@ def main():
         if VERBOSE:
             print("-" * 80)
             print(_SHARE_LINK_DISPLAY_MSG.format(share_url))
-            print(_SHARE_CODE_DISPLAY_MSG.format(code))
+            print(_SHARE_CODE_DISPLAY_MSG.format(format_share_code(code)))
             if not args.quiet:
                 print(_SHARE_LINK_MSG)
             print("-" * 80)
@@ -206,7 +206,7 @@ def main():
             print("=" * 58)
             print("        YOUR SHARE CODE")
             print()
-            print(f"        {code}")
+            print(f"        {format_share_code(code)}")
             print()
             print("=" * 58)
             print()

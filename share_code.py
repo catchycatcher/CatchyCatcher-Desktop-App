@@ -13,10 +13,45 @@ produces a code the web client cannot decode.
 """
 
 from urllib.parse import urlparse
+import re
 
 _BASE16_ALPHABET = "0123456789abcdef"
 _BASE36_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
 _BASE62_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+def _share_code_groups(length: int) -> list[int]:
+    """Group sizes a code of ``length`` characters splits into (see below)."""
+    full, remainder = divmod(length, 4)
+    if remainder == 0:
+        return [4] * full
+    if full == 0:
+        return [length]
+    if remainder == 1:
+        return [4] * (full - 1) + [5]
+    if remainder == 2:
+        return [4] * (full - 1) + [3, 3]
+    return [4] * full + [3]
+
+
+def format_share_code(code: str) -> str:
+    """Group a code into fours with hyphens, for display only.
+
+    The tail is arranged so there is never a lone character: one left over
+    becomes a group of five, two left over become two groups of three, and three
+    left over stay as a group of four and a group of three. Anything that is not
+    a letter or digit is dropped first, so re-formatting is safe. The hyphens are
+    cosmetic; the API always receives the raw code.
+    """
+    clean = re.sub(r"[^0-9A-Za-z]", "", code)
+    if not clean:
+        return ""
+    groups: list[str] = []
+    cursor = 0
+    for size in _share_code_groups(len(clean)):
+        groups.append(clean[cursor : cursor + size])
+        cursor += size
+    return "-".join(groups)
 
 
 def _rebase(text: str, from_alphabet: str, to_alphabet: str) -> str:

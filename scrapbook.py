@@ -121,15 +121,17 @@ def build_timeline(
             for text, word_start, word_end in _source_words(entry, line_start)
         ]
 
-        timeline.append(
-            {
-                "bpm": round(target, 1),
-                "start time": round(mix_start, 3),
-                "end time": round(mix_end, 3),
-                "source_bpm": round(source_bpm, 1),
-                "words": words,
-            }
-        )
+        entry_line: dict[str, Any] = {
+            "bpm": round(target, 1),
+            "start time": round(mix_start, 3),
+            "end time": round(mix_end, 3),
+            "source_bpm": round(source_bpm, 1),
+            "words": words,
+        }
+        source = entry.get("source")
+        if isinstance(source, dict):
+            entry_line["source"] = source
+        timeline.append(entry_line)
         cursor = mix_end
 
         if index < len(entries) - 1:
