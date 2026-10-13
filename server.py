@@ -1291,7 +1291,16 @@ def _scrapbook_meta_path(session_id: str, scrapbook_id: str) -> Path:
 
 
 #: Section types a scrapbook line can be grouped under (UI colour-coding only).
-SECTION_TYPES = ("chorus", "verse", "bridge", "other")
+SECTION_TYPES = (
+    "chorus",
+    "verse",
+    "bridge",
+    "pre-chorus",
+    "tag",
+    "intro",
+    "outro",
+    "other",
+)
 
 
 def _normalize_line_ref(ref: Any) -> dict[str, Any] | None:

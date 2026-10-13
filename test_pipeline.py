@@ -1366,6 +1366,21 @@ class ApiTests(unittest.TestCase):
         instances = [entry["group"]["instance"] for entry in lines]
         self.assertEqual(len(set(instances)), 2)
 
+    def test_scrapbook_accepts_new_section_types(self):
+        line = {"session_id": "s", "take_id": "t", "line_index": 0, "data": {}}
+        lines = server._normalize_lines(
+            [
+                {"group": {"id": "g", "type": "pre-chorus", "instance": "a"}, "lines": [line]},
+                {"group": {"id": "h", "type": "tag", "instance": "b"}, "lines": [line]},
+                {"group": {"id": "i", "type": "intro", "instance": "c"}, "lines": [line]},
+                {"group": {"id": "j", "type": "outro", "instance": "d"}, "lines": [line]},
+            ]
+        )
+        self.assertEqual(
+            [entry["group"]["type"] for entry in lines],
+            ["pre-chorus", "tag", "intro", "outro"],
+        )
+
     def test_scrapbook_signature_ignores_groups(self):
         bare = [{"session_id": "s", "take_id": "t", "line_index": 0, "data": {}}]
         grouped = [
