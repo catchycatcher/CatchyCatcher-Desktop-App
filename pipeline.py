@@ -12,12 +12,16 @@ JSON-compatible payload described in ``SYSTEM_INSTRUCTIONS.md``::
           "start time": 12.45,
           "end time": 15.82,
           "words": [
-            {"word": "hello", "length": 0.37},
-            {"word": "world", "length": 0.33}
+            {"word": "hello", "start": 12.45, "end": 12.82, "length": 0.37},
+            {"word": "world", "start": 12.82, "end": 13.15, "length": 0.33}
           ]
         }
       ]
     }
+
+Each word carries its exact ``start``/``end`` (seconds) as well as ``length``,
+so a client can highlight words as the audio plays; the spec's minimum fields
+are unchanged.
 
 The heavy dependencies (torch, torchaudio, demucs, whisperx, librosa) are
 imported lazily so the API can start and report health on a machine where they
@@ -969,7 +973,13 @@ def process_song_session(
                 "start time": line_start,
                 "end time": line_end,
                 "words": [
-                    {"word": w["word"], "length": w["length"]} for w in line_words
+                    {
+                        "word": w["word"],
+                        "start": w["start"],
+                        "end": w["end"],
+                        "length": w["length"],
+                    }
+                    for w in line_words
                 ],
             }
         )

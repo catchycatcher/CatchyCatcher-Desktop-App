@@ -594,7 +594,10 @@ class ProcessSongSessionFlowTests(unittest.TestCase):
         self.assertEqual(line["end time"], 0.9)
         self.assertEqual(
             line["words"],
-            [{"word": "hello", "length": 0.4}, {"word": "world", "length": 0.4}],
+            [
+                {"word": "hello", "start": 0.0, "end": 0.4, "length": 0.4},
+                {"word": "world", "start": 0.5, "end": 0.9, "length": 0.4},
+            ],
         )
 
         # Two stems exported, plus scratch WAVs are cleaned up.
@@ -622,7 +625,10 @@ class ProcessSongSessionFlowTests(unittest.TestCase):
             )
 
         self.assertEqual(len(result["lyrics"]), 2)
-        self.assertEqual(result["lyrics"][0]["words"], [{"word": "hello", "length": 0.4}])
+        self.assertEqual(
+            result["lyrics"][0]["words"],
+            [{"word": "hello", "start": 0.0, "end": 0.4, "length": 0.4}],
+        )
 
 
 class ApiTests(unittest.TestCase):
@@ -872,6 +878,81 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.headers["x-session-id"], "mysong")
         self.assertEqual(resp.headers["x-take-id"], "take")
+
+    def test_store_without_processing_then_process_later(self):
+        stored = self.client.post(
+            "/sessions/journal/takes/entry1",
+            params={"process": "false", "index": 1},
+            files={"file": ("entry1.webm", b"raw-audio-bytes", "audio/webm")},
+        )
+        self.assertEqual(stored.status_code, 200, stored.text)
+        meta = stored.json()
+        self.assertEqual(meta["status"], "recorded")
+        self.assertFalse(meta["processed"])
+        self.assertEqual(meta["index"], 1)
+
+        # The manifest keeps the entry around, unprocessed.
+        manifest = self.client.get("/sessions/journal").json()
+        self.assertEqual(manifest["take_count"], 1)
+        self.assertEqual(manifest["takes"][0]["status"], "recorded")
+
+        # The stored audio can be streamed back as-is.
+        original = self.client.get("/sessions/journal/takes/entry1/original")
+        self.assertEqual(original.status_code, 200)
+        self.assertEqual(original.content, b"raw-audio-bytes")
+
+        # ... and processed on demand.
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            processed = self.client.post("/sessions/journal/takes/entry1/process")
+        self.assertEqual(processed.status_code, 200, processed.text)
+        self.assertEqual(
+            processed.json()["lyrics"][0]["words"], [{"word": "hi", "length": 0.5}]
+        )
+        self.assertEqual(
+            self.client.get("/sessions/journal/takes/entry1").json()["meta"]["status"],
+            "done",
+        )
+
+    def test_upload_is_processed_by_default(self):
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ) as process:
+            resp = self.client.post(
+                "/sessions/default/takes/t",
+                files={"file": ("t.m4a", b"x", "audio/mp4")},
+            )
+        self.assertEqual(resp.status_code, 200)
+        process.assert_called_once()
+
+    def test_take_names_default_and_rename(self):
+        named = self.client.post(
+            "/sessions/named/takes/e1",
+            params={"process": "false", "name": "Lazy Horse"},
+            files={"file": ("e1.webm", b"x", "audio/webm")},
+        )
+        self.assertEqual(named.json()["name"], "Lazy Horse")
+
+        default = self.client.post(
+            "/sessions/named/takes/e2",
+            params={"process": "false"},
+            files={"file": ("e2.webm", b"x", "audio/webm")},
+        )
+        self.assertEqual(default.json()["name"], "e2")
+
+        renamed = self.client.patch(
+            "/sessions/named/takes/e1", params={"name": "Brave Comet"}
+        )
+        self.assertEqual(renamed.status_code, 200, renamed.text)
+        self.assertEqual(renamed.json()["name"], "Brave Comet")
+
+        manifest = self.client.get("/sessions/named").json()
+        names = {take["take_id"]: take["name"] for take in manifest["takes"]}
+        self.assertEqual(names, {"e1": "Brave Comet", "e2": "e2"})
+
+        missing = self.client.patch("/sessions/named/takes/nope", params={"name": "x"})
+        self.assertEqual(missing.status_code, 404)
 
 
 if __name__ == "__main__":

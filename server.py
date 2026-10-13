@@ -15,9 +15,13 @@ Endpoints
 ``GET    /health``
     Liveness + which torch device would be used.
 ``POST   /sessions/{session_id}/takes/{take_id}``
-    Upload one take (multipart field ``file``) and process it. Returns the schema
-    from ``SYSTEM_INSTRUCTIONS.md``. Optional ``index`` and ``silence_threshold``
-    query parameters.
+    Upload one take (multipart field ``file``). Processed by default; pass
+    ``process=false`` to store the audio only. Optional ``index``, ``name``,
+    ``process`` and ``silence_threshold`` query parameters.
+``POST   /sessions/{session_id}/takes/{take_id}/process``
+    Process a take that was previously stored unprocessed.
+``PATCH  /sessions/{session_id}/takes/{take_id}``
+    Rename a journal entry (``name`` query parameter).
 ``GET    /sessions``
     List stored sessions as ``{"id", "name", "updated_at"}`` objects, ordered by
     id.
@@ -34,6 +38,8 @@ Endpoints
     One take's metadata and (when finished) its result.
 ``GET    /sessions/{session_id}/takes/{take_id}/audio/{stem}``
     Stream a generated stem, where ``stem`` is ``vocals`` or ``background``.
+``GET    /sessions/{session_id}/takes/{take_id}/original``
+    Stream the raw recording of a take, processed or not.
 ``DELETE /sessions/{session_id}/takes/{take_id}``
     Remove a take and its files.
 ``POST   /process-session``
@@ -328,14 +334,28 @@ def session_updated_at(session_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _process_take(
+def _take_input_path(take_dir: Path, meta: dict[str, Any] | None = None) -> Path:
+    """The stored recording for a take, whether or not it has been processed."""
+    if isinstance(meta, dict):
+        name = meta.get("input_filename")
+        if isinstance(name, str) and name:
+            candidate = take_dir / name
+            if candidate.is_file():
+                return candidate
+    for candidate in sorted(take_dir.glob("input.*")):
+        if candidate.is_file():
+            return candidate
+    raise HTTPException(status_code=404, detail="No stored audio for this take.")
+
+
+def _save_take(
     session_id: str,
     take_id: str,
     file: UploadFile,
     index: int | None,
-    silence_threshold: float,
-) -> JSONResponse:
-    """Store, process and record a single take, then return its result."""
+    name: str | None = None,
+) -> tuple[str, str, Path, dict[str, Any], Path]:
+    """Store the uploaded audio and its (unprocessed) metadata."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename on the uploaded file.")
 
@@ -346,7 +366,8 @@ def _process_take(
 
     # Keep the original extension (defaulting to .m4a) for ffmpeg's benefit.
     suffix = Path(file.filename).suffix.lower() or ".m4a"
-    input_path = take_dir / f"input{suffix}"
+    input_name = f"input{suffix}"
+    input_path = take_dir / input_name
     try:
         with open(input_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
@@ -360,15 +381,38 @@ def _process_take(
         if index is None:
             index = _next_index(sid)
 
+    prior_name = previous.get("name")
+    prior_name = prior_name if isinstance(prior_name, str) and prior_name.strip() else tid
+
     meta: dict[str, Any] = {
         "session_id": sid,
         "take_id": tid,
         "index": int(index),
+        "name": _clean_name(name, prior_name),
         "filename": file.filename,
-        "status": "processing",
+        "input_filename": input_name,
+        "processed": False,
+        "status": "recorded",
         "error": None,
         "created_at": previous.get("created_at") or _now(),
     }
+    _write_json(meta_path, meta)
+    _touch_session(sid)
+    return sid, tid, take_dir, meta, meta_path
+
+
+def _run_pipeline(
+    sid: str,
+    tid: str,
+    take_dir: Path,
+    meta: dict[str, Any],
+    meta_path: Path,
+    silence_threshold: float,
+) -> JSONResponse:
+    """Process an already-stored take and return the spec payload."""
+    input_path = _take_input_path(take_dir, meta)
+    meta["input_filename"] = input_path.name
+    meta["status"] = "processing"
     _write_json(meta_path, meta)
 
     try:
@@ -389,6 +433,7 @@ def _process_take(
 
         _write_json(take_dir / "result.json", result)
         meta["status"] = "done"
+        meta["processed"] = True
         meta["finished_at"] = _now()
         _write_json(meta_path, meta)
 
@@ -397,8 +442,43 @@ def _process_take(
         response.headers["X-Take-Id"] = tid
         return response
     finally:
-        # Adding (or finishing) a take modifies the session; record when.
+        # Processing a take modifies the session; record when.
         _touch_session(sid)
+
+
+def _take_json_response(payload: Any, meta: dict[str, Any]) -> JSONResponse:
+    response = JSONResponse(payload)
+    response.headers["X-Session-Id"] = str(meta.get("session_id", ""))
+    response.headers["X-Take-Id"] = str(meta.get("take_id", ""))
+    return response
+
+
+def _process_take(
+    session_id: str,
+    take_id: str,
+    file: UploadFile,
+    index: int | None,
+    silence_threshold: float,
+    name: str | None = None,
+) -> JSONResponse:
+    """Store, process and record a single take, then return its result."""
+    sid, tid, take_dir, meta, meta_path = _save_take(session_id, take_id, file, index, name)
+    return _run_pipeline(sid, tid, take_dir, meta, meta_path, silence_threshold)
+
+
+def _store_take(
+    session_id: str,
+    take_id: str,
+    file: UploadFile,
+    index: int | None,
+    name: str | None = None,
+) -> JSONResponse:
+    """Store a take without processing it, returning its (raw) metadata."""
+    _sid, _tid, _take_dir, meta, _meta_path = _save_take(
+        session_id, take_id, file, index, name
+    )
+    return _take_json_response(meta, meta)
+
 
 
 def _record_failure(meta_path: Path, meta: dict[str, Any], error: str) -> None:
@@ -420,13 +500,16 @@ def root() -> dict[str, Any]:
         "name": "Catchy Catcher Processing Engine",
         "endpoints": [
             "POST /sessions/{session_id}/takes/{take_id}",
+            "POST /sessions/{session_id}/takes/{take_id}/process",
             "GET /sessions",
             "POST /sessions/{session_id}",
             "PATCH /sessions/{session_id}",
             "DELETE /sessions/{session_id}",
             "GET /sessions/{session_id}",
             "GET /sessions/{session_id}/takes/{take_id}",
+            "PATCH /sessions/{session_id}/takes/{take_id}",
             "GET /sessions/{session_id}/takes/{take_id}/audio/{stem}",
+            "GET /sessions/{session_id}/takes/{take_id}/original",
             "DELETE /sessions/{session_id}/takes/{take_id}",
             "POST /process-session",
         ],
@@ -451,6 +534,15 @@ def create_take(
         description="1-based position of the take within the session. "
         "Defaults to one past the highest existing take.",
     ),
+    name: str | None = Query(
+        default=None,
+        description="Display name for the entry. Defaults to the take id.",
+    ),
+    process: bool = Query(
+        default=True,
+        description="Run the pipeline now; ``false`` just stores the audio so it "
+        "can be processed later via ``POST .../process``.",
+    ),
     silence_threshold: float = Query(
         default=pipeline.SILENCE_THRESHOLD,
         gt=0,
@@ -458,8 +550,50 @@ def create_take(
         description="Seconds of pause that always starts a new lyric line. Other signals (relative pauses, punctuation, nearby line length) are combined into the same line-break score.",
     ),
 ) -> JSONResponse:
-    """Process one take. Blocks until the stems and lyric timeline are ready."""
-    return _process_take(session_id, take_id, file, index, silence_threshold)
+    """Store one take, processing it now unless ``process=false``."""
+    if process:
+        return _process_take(session_id, take_id, file, index, silence_threshold, name)
+    return _store_take(session_id, take_id, file, index, name)
+
+
+@app.patch("/sessions/{session_id}/takes/{take_id}")
+def rename_take(
+    session_id: str,
+    take_id: str,
+    name: str = Query(..., min_length=1, description="New entry name."),
+) -> dict[str, Any]:
+    """Rename a journal entry; its audio and result are untouched."""
+    sid = sanitize_id(session_id)
+    tid = sanitize_id(take_id)
+    take_dir = _take_dir(sid, tid)
+    meta = _read_json(take_dir / "meta.json")
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Unknown take.")
+    meta["name"] = _clean_name(name, tid)
+    _write_json(take_dir / "meta.json", meta)
+    _touch_session(sid)
+    return {"take_id": tid, "name": meta["name"]}
+
+
+@app.post("/sessions/{session_id}/takes/{take_id}/process")
+def process_take(
+    session_id: str,
+    take_id: str,
+    silence_threshold: float = Query(
+        default=pipeline.SILENCE_THRESHOLD,
+        gt=0,
+        le=5,
+        description="Seconds of pause that always starts a new lyric line. Other signals (relative pauses, punctuation, nearby line length) are combined into the same line-break score.",
+    ),
+) -> JSONResponse:
+    """Process a previously stored (unprocessed) take and return its result."""
+    sid = sanitize_id(session_id)
+    tid = sanitize_id(take_id)
+    take_dir = _take_dir(sid, tid)
+    meta = _read_json(take_dir / "meta.json")
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Unknown take.")
+    return _run_pipeline(sid, tid, take_dir, meta, take_dir / "meta.json", silence_threshold)
 
 
 @app.get("/sessions")
@@ -584,6 +718,17 @@ def get_take_audio(session_id: str, take_id: str, stem: str) -> FileResponse:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Audio not found for this take.")
     return FileResponse(path, media_type="audio/mp4", filename=f"{stem}.m4a")
+
+
+@app.get("/sessions/{session_id}/takes/{take_id}/original")
+def get_take_original(session_id: str, take_id: str) -> FileResponse:
+    """Stream the raw recording of a take, processed or not."""
+    take_dir = _take_dir(session_id, take_id)
+    meta = _read_json(take_dir / "meta.json")
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Unknown take.")
+    path = _take_input_path(take_dir, meta)
+    return FileResponse(path, filename=path.name)
 
 
 @app.delete("/sessions/{session_id}/takes/{take_id}")
