@@ -28,13 +28,15 @@ Pipeline stages:
 
 1. Stem separation with Demucs (``htdemucs``) on CUDA when available.
 2. Precision transcription + forced phoneme alignment with WhisperX.
-3. Word grouping into lyric lines from a combined break score: pause size,
-   relative pause, sentence/clause punctuation and nearby line length.
+3. Word grouping into lyric lines with a four-stage break model: seed each gap
+   from pause size and punctuation, then a rhyme pass, a line-length pass and a
+   rolling threshold decide where the lines actually break.
 4. Per-line BPM estimation with librosa.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import statistics
 import subprocess
@@ -44,6 +46,8 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
+import phonetics
+
 # ---------------------------------------------------------------------------
 # Tunables (see "Implementation Guidelines" in SYSTEM_INSTRUCTIONS.md)
 # ---------------------------------------------------------------------------
@@ -51,49 +55,105 @@ import numpy as np
 #: Pause in seconds between two words that *always* starts a new lyric line.
 SILENCE_THRESHOLD = 0.4
 
-# --- Line-grouping model (see ``group_words_into_lines``) ------------------
+# ---------------------------------------------------------------------------
+# Line-grouping model (see ``group_words_into_lines``)
+# ---------------------------------------------------------------------------
 #
-# Whether a boundary is a line break is a *score*, not a single condition. Each
-# signal contributes its own amount and they all add up; the line only breaks
-# when the total clears zero. This lets a comma tip an otherwise ordinary pause
-# over the line, and lets a long line be broken even without punctuation.
+# A word timeline has no line breaks in it: every boundary between two words is
+# just a gap. Grouping them happens in four stages, each one writing a break
+# *likelihood* (0..1) onto that boundary:
 #
-#   score = W_GAP   * (gap / silence_threshold)              # a real pause
-#         + MIN(gap / MIN_BREAK_GAP, 1) * (                  # (soft signals only
-#               W_REL   * (gap / local_median_gap - 1)       #  count once a
-#             + W_PUNCT * punctuation_weight)                #  pause exists)
-#         + W_LEN   * (line_seconds / nearby - SLACK)        # long vs nearby lines
-#         - BIAS
+#   1. Seed    each gap gets a likelihood from how long the pause is, how it
+#              compares to the singer's other pauses, and the sentence/clause
+#              punctuation on the word before it (plus a nudge when the next
+#              word opens a new sentence):
 #
-# A gap at ``silence_threshold`` scores ``1.0 - BIAS > 0`` on its own, so a clear
-# pause always breaks. The softer signals are deliberately conservative: they
-# need a real pause (``MIN_BREAK_GAP``) to have any effect, which keeps tiny
-# timing wobbles and stray punctuation from splitting the middle of a phrase.
+#                score = W_GAP   * (gap / silence_threshold)
+#                      + gate * ( W_REL   * (gap / local_median_gap - 1)
+#                               + W_PUNCT * punctuation_weight
+#                               + W_NEXT  * next_sentence )
+#                      - BIAS
+#                likelihood = sigmoid(SHARPNESS * score)
 #
-# ``group_words_into_lines`` runs twice: once to learn the typical line length,
-# then again with the nearby-line signal enabled.
+#              ``gate`` fades the softer signals out below ``MIN_BREAK_GAP`` so
+#              timing wobble cannot split a line, and a gap at the silence
+#              threshold scores well above 0.5 on its own.
+#
+#   2. Rhyme   gaps whose word near-rhymes with the word at another *nearby*
+#              likely break are pushed up together, so a rhyme lands on a line
+#              ending instead of in the middle of one.
+#
+#   3. Length  gaps are nudged so the line they would close sits close to the
+#              length of the lines around them.
+#
+#   4. Rolling the boundaries are finally committed left to right. A gap at or
+#              over ``silence_threshold`` always breaks, a line that outgrows
+#              its neighbours is force-broken, a line long enough to end on a
+#              comma or full stop breaks even with no pause, and otherwise a gap
+#              breaks when it clears a threshold that drifts to keep recent
+#              lines near the song's typical line length. This makes the breaks
+#              land at a sensible frequency.
+#
+# ``group_words_into_lines`` runs the rolling pass twice: once from the raw
+# seeds to learn the typical line length, then again after stages 2-3.
 
-#: Weight of the absolute pause (``gap / silence_threshold``); 1.0 means a gap
-#: exactly at the threshold contributes that whole weight.
+#: Weight of the absolute pause (``gap / silence_threshold``).
 GAP_WEIGHT = 1.0
-#: Weight of "this pause is long compared to the surrounding words".
-RELATIVE_GAP_WEIGHT = 0.35
-#: Weight of sentence/clause punctuation.
-PUNCTUATION_WEIGHT = 0.4
-#: Weight of "this line is long compared to nearby lines".
-LINE_LENGTH_WEIGHT = 0.7
-#: Subtracted from the total; the boundary breaks when the score is >= 0.
+#: Weight of "this pause is long compared to the singer's nearby gaps".
+RELATIVE_GAP_WEIGHT = 0.3
+#: Weight of sentence/clause punctuation on the word before the gap.
+PUNCTUATION_WEIGHT = 0.5
+#: Weight of "the next word opens a new sentence" (a capitalised word).
+NEXT_SENTENCE_WEIGHT = 0.15
+#: Subtracted from the score before the logistic squashes it into 0..1.
 BREAK_BIAS = 0.9
+#: Scales the score around zero: larger = more decisive likelihoods.
+PROBABILITY_SHARPNESS = 4.0
 #: Caps that keep individual terms from dominating the score.
 MAX_GAP_RATIO = 3.0
 MAX_RELATIVE_RATIO = 2.5
 #: A pause shorter than this can never be broken by the softer signals alone
-#: (relative pause, punctuation, nearby line length). Below it, those signals
-#: are scaled down toward nothing, so tiny timing wobbles do not split a line.
-MIN_BREAK_GAP = 0.25
-#: A line must reach this multiple of the nearby line length before the length
-#: signal starts contributing at all.
-LINE_LENGTH_SLACK = 1.25
+#: (relative pause, punctuation, line length). Below it, those signals are
+#: scaled down toward nothing, so tiny timing wobbles do not split a line.
+MIN_BREAK_GAP = 0.3
+#: A line ending on sentence/clause punctuation may still break with almost no
+#: pause once it has this many words -- a phrase can end on a comma or full
+#: stop the singer runs straight through. Tiny clauses (``tell me,``) stay put.
+PUNCT_BREAK_MIN_WORDS = 3
+
+# --- Rhyme scheme ----------------------------------------------------------
+#: Likelihood a gap needs before it counts as a candidate line ending for the
+#: rhyme pass. Set at the base break threshold so a rhyme only reinforces
+#: endings that are already plausible, rather than inventing new ones.
+RHYME_CANDIDATE_PROBABILITY = 0.5
+#: How many candidate breaks either side of one are inspected for a rhyme.
+RHYME_WINDOW = 4
+#: Extra likelihood a rhyming pair of endings gets, scaled by how near the
+#: rhyme is.
+RHYME_BONUS = 0.35
+#: A pair of line endings scoring below this is not treated as a rhyme.
+RHYME_MIN_SIMILARITY = 0.5
+
+# --- Line-length consistency ----------------------------------------------
+#: Likelihood nudge applied to gaps that would close an over/under-long line.
+LENGTH_BONUS = 0.35
+#: A line may reach this multiple of its neighbours before its internal gaps
+#: are pushed up.
+LENGTH_TOLERANCE = 1.15
+#: A line under this multiple of its neighbours has its gaps pushed down.
+LENGTH_SHORT_SLACK = 0.8
+
+# --- Rolling selection -----------------------------------------------------
+#: Likelihood a gap must clear before it becomes a line break.
+BASE_BREAK_THRESHOLD = 0.5
+#: The rolling threshold never drifts outside these bounds.
+THRESHOLD_MIN = 0.35
+THRESHOLD_MAX = 0.8
+#: A line is force-broken once it reaches this multiple of the rolling target,
+#: even when there is no pause or punctuation to break on.
+FORCE_LENGTH_MULTIPLIER = 1.8
+#: ... but never force-break a line shorter than this many words.
+MIN_FORCE_WORDS = 3
 
 #: Punctuation that very strongly suggests the line ends here.
 SENTENCE_END_PUNCTUATION = ".!?…"
@@ -101,7 +161,7 @@ SENTENCE_END_PUNCTUATION = ".!?…"
 CLAUSE_PUNCTUATION = ",;:"
 #: How many neighbouring gaps a gap is compared against.
 GAP_WINDOW = 3
-#: How many recently finished lines the nearby-length signal compares against.
+#: How many recently finished lines the rolling target is drawn from.
 LINE_WINDOW = 4
 #: Hard ceilings; a line never grows past these.
 MAX_LINE_SECONDS = 14.0
@@ -218,47 +278,164 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def _break_score(
+def _sigmoid(value: float) -> float:
+    """Logistic squash into ``(0, 1)`` without overflowing on big scores."""
+    if value >= 0:
+        return 1.0 / (1.0 + math.exp(-value))
+    exp = math.exp(value)
+    return exp / (1.0 + exp)
+
+
+def _next_sentence_weight(words: list[dict[str, Any]], index: int) -> float:
+    """1.0 when the word after the gap opens a new sentence, else 0.0.
+
+    WhisperX keeps the case of the source, so a capitalised next word is a
+    decent hint that a sentence just ended.
+    """
+    if index + 1 >= len(words):
+        return 0.0
+    following = str(words[index + 1].get("word", "")).strip()
+    return 1.0 if following[:1].isupper() else 0.0
+
+
+def _seed_break_probabilities(
     words: list[dict[str, Any]],
     gaps: list[float],
-    index: int,
-    line_start: int,
     silence_threshold: float,
-    nearby_seconds: float | None,
-) -> float:
-    """Total likelihood (>= 0 means "break here") for the boundary at ``index``.
+) -> list[float]:
+    """Stage 1: one break likelihood per gap from pause size and structure.
 
-    Every signal is folded in: the absolute pause, how the pause compares to the
-    singer's nearby gaps, punctuation, and how long the line has grown compared
-    to the lines around it.
+    The absolute pause, its size relative to the singer's nearby gaps, the
+    punctuation on the word before the gap and a new-sentence hint all fold
+    into one score, which the logistic turns into a 0..1 likelihood.
     """
-    gap = gaps[index]
+    likelihoods: list[float] = []
+    for index, gap in enumerate(gaps):
+        x_gap = 0.0
+        if silence_threshold > 0:
+            x_gap = _clamp(gap / silence_threshold, 0.0, MAX_GAP_RATIO)
 
-    x_gap = 0.0
-    if silence_threshold > 0:
-        x_gap = _clamp(gap / silence_threshold, 0.0, MAX_GAP_RATIO)
+        scale = _local_gap_scale(gaps, index)
+        x_relative = 0.0
+        if scale > 0:
+            x_relative = max(0.0, _clamp(gap / scale, 0.0, MAX_RELATIVE_RATIO) - 1.0)
 
-    scale = _local_gap_scale(gaps, index)
-    x_relative = 0.0
-    if scale > 0:
-        x_relative = _clamp(gap / scale, 0.0, MAX_RELATIVE_RATIO) - 1.0
+        structure = (
+            RELATIVE_GAP_WEIGHT * x_relative
+            + PUNCTUATION_WEIGHT * _punct_weight(str(words[index].get("word", "")))
+            + NEXT_SENTENCE_WEIGHT * _next_sentence_weight(words, index)
+        )
+        # Softer signals only count once there is a real pause to react to.
+        if MIN_BREAK_GAP > 0:
+            structure *= _clamp(gap / MIN_BREAK_GAP, 0.0, 1.0)
 
-    support = (
-        RELATIVE_GAP_WEIGHT * x_relative
-        + PUNCTUATION_WEIGHT * _punct_weight(str(words[index].get("word", "")))
+        score = GAP_WEIGHT * x_gap + structure - BREAK_BIAS
+        likelihoods.append(_sigmoid(PROBABILITY_SHARPNESS * score))
+    return likelihoods
+
+
+def _near_rhyme_similarity(first: str, second: str) -> float:
+    """How closely two words rhyme, 0..1 (pronunciation-dictionary backed).
+
+    A perfect rhyme scores 1.0; sharing the rime vowel but not the ending
+    (assonance) scores lower. See :mod:`phonetics` for the fallback used when
+    the CMU dictionary is not installed.
+    """
+    return phonetics.rhyme_similarity(first, second)
+
+
+def _apply_rhyme_scheme(
+    words: list[dict[str, Any]],
+    likelihoods: list[float],
+) -> list[float]:
+    """Stage 2: let a rhyme pull two nearby likely endings up together."""
+    adjusted = list(likelihoods)
+    candidates = [
+        index
+        for index, value in enumerate(likelihoods)
+        if value >= RHYME_CANDIDATE_PROBABILITY
+    ]
+    for position, first in enumerate(candidates):
+        neighbours = candidates[position + 1 : position + 1 + RHYME_WINDOW]
+        for second in neighbours:
+            similarity = _near_rhyme_similarity(
+                str(words[first].get("word", "")),
+                str(words[second].get("word", "")),
+            )
+            if similarity < RHYME_MIN_SIMILARITY:
+                continue
+            boost = RHYME_BONUS * similarity
+            adjusted[first] = min(1.0, adjusted[first] + boost)
+            adjusted[second] = min(1.0, adjusted[second] + boost)
+    return adjusted
+
+
+def _apply_line_length_consistency(
+    words: list[dict[str, Any]],
+    gaps: list[float],
+    likelihoods: list[float],
+    target_seconds: float | None,
+) -> list[float]:
+    """Stage 3: nudge gaps to close a line the size of the nearby ones.
+
+    The gaps already likely to break anchor the lines; a boundary that could
+    break is pushed up when the line it would close is too long and pushed down
+    when the line is too short, so line sizes drift toward the local target.
+    A weak seam is left alone: this stage only reinforces real candidates.
+    """
+    if not target_seconds or target_seconds <= 0:
+        return list(likelihoods)
+
+    adjusted = list(likelihoods)
+    previous_anchor = -1
+    for index, value in enumerate(likelihoods):
+        if value < BASE_BREAK_THRESHOLD and index != len(likelihoods) - 1:
+            continue
+        line_start = previous_anchor + 1
+        for gap_index in range(previous_anchor + 1, index + 1):
+            seconds = float(words[gap_index]["end"]) - float(words[line_start]["start"])
+            ratio = seconds / target_seconds
+            # A gap with no real pause in it is never a good break, so the nudge
+            # is faded out below ``MIN_BREAK_GAP`` just like the seed signals.
+            viability = (
+                _clamp(float(gaps[gap_index]) / MIN_BREAK_GAP, 0.0, 1.0)
+                if MIN_BREAK_GAP > 0
+                else 1.0
+            )
+            if ratio >= LENGTH_TOLERANCE and adjusted[gap_index] >= BASE_BREAK_THRESHOLD:
+                # Only reinforce a boundary that could already break: the nudge
+                # must not turn a weak seam into a new line all by itself.
+                adjusted[gap_index] = min(
+                    1.0,
+                    adjusted[gap_index] + LENGTH_BONUS * _clamp(ratio - 1.0, 0.0, 1.0) * viability,
+                )
+            elif ratio <= LENGTH_SHORT_SLACK:
+                adjusted[gap_index] = max(
+                    0.0,
+                    adjusted[gap_index] - LENGTH_BONUS * _clamp(1.0 - ratio, 0.0, 1.0) * viability,
+                )
+        previous_anchor = index
+    return adjusted
+
+
+def _rolling_threshold(recent: list[float], target: float | None) -> float:
+    """The break threshold for the next line, drifting around the base value.
+
+    Recent lines longer than the target push it down (so the singer breaks more
+    often); lines shorter than the target push it up. The break frequency thus
+    self-corrects toward the song's typical line length.
+    """
+    if not target or target <= 0:
+        return BASE_BREAK_THRESHOLD
+    usable = [length for length in recent if length > 0]
+    if not usable:
+        return BASE_BREAK_THRESHOLD
+    median = statistics.median(usable)
+    if median <= 0:
+        return BASE_BREAK_THRESHOLD
+    return _clamp(
+        BASE_BREAK_THRESHOLD * (target / median), THRESHOLD_MIN, THRESHOLD_MAX
     )
-    # Softer signals only count once there is a real pause to react to.
-    if MIN_BREAK_GAP > 0:
-        support *= _clamp(gap / MIN_BREAK_GAP, 0.0, 1.0)
-
-    score = GAP_WEIGHT * x_gap + support
-
-    if nearby_seconds and nearby_seconds > 0:
-        line_seconds = float(words[index]["end"]) - float(words[line_start]["start"])
-        over = line_seconds / nearby_seconds - LINE_LENGTH_SLACK
-        score += LINE_LENGTH_WEIGHT * max(0.0, over)
-
-    return score - BREAK_BIAS
 
 
 def _best_internal_boundary(
@@ -280,19 +457,52 @@ def _best_internal_boundary(
     )
 
 
-def _segment_lines(
+def _best_likely_boundary(
     words: list[dict[str, Any]],
     gaps: list[float],
+    likelihoods: list[float],
+    start: int,
+    index: int,
+) -> int:
+    """The best boundary in ``[start, index]`` to force-break an over-long line.
+
+    Highest break likelihood first, then the pause size, punctuation and how
+    close it sits to the middle of the line, so an over-long phrase breaks at
+    its strongest natural seam instead of an arbitrary word.
+    """
+    middle = (start + index) / 2
+    return max(
+        range(start, index + 1),
+        key=lambda j: (
+            round(likelihoods[j], 3),
+            round(gaps[j], 3),
+            _punct_weight(str(words[j].get("word", ""))),
+            -abs(j - middle),
+        ),
+    )
+
+
+def _select_lines(
+    words: list[dict[str, Any]],
+    gaps: list[float],
+    likelihoods: list[float],
     silence_threshold: float,
-    nearby_seconds: float | None,
+    target_seconds: float | None,
     max_line_seconds: float,
     max_line_words: int,
 ) -> list[list[dict[str, Any]]]:
-    """Greedily cut ``words`` into lines, tracking recent line lengths."""
+    """Stage 4: commit breaks left to right with a rolling, adaptive threshold.
+
+    A gap at or over ``silence_threshold`` always breaks, as does a line that
+    reaches the hard ceiling or outgrows the rolling target. Otherwise the gap
+    must clear a likelihood threshold that drifts to keep the break frequency
+    near the song's typical line length.
+    """
     lines: list[list[dict[str, Any]]] = []
-    recent_lengths: list[float] = []
+    recent: list[float] = []
     start = 0
     index = 0
+    threshold = BASE_BREAK_THRESHOLD
 
     while index < len(gaps):
         count = index - start + 1
@@ -302,21 +512,60 @@ def _segment_lines(
         if count >= max_line_words or seconds >= max_line_seconds:
             cut = _best_internal_boundary(words, gaps, start, index) if index > start else index
             lines.append(words[start : cut + 1])
-            recent_lengths.append(float(words[cut]["end"]) - float(words[start]["start"]))
-            if len(recent_lengths) > LINE_WINDOW:
-                recent_lengths.pop(0)
+            recent.append(float(words[cut]["end"]) - float(words[start]["start"]))
+            if len(recent) > LINE_WINDOW:
+                recent.pop(0)
             start = cut + 1
             index = cut + 1
+            threshold = _rolling_threshold(recent, target_seconds)
             continue
 
         # "Nearby lines" = the lines we just finished (they tend to be similar).
-        target = statistics.median(recent_lengths) if recent_lengths else nearby_seconds
-        if _break_score(words, gaps, index, start, silence_threshold, target) >= 0.0:
+        # They may shorten the reference (break sooner), but never below the
+        # song's typical line, so a normal line after a run of short ones is not
+        # chopped up. Without a learned target (the first pass) nothing is
+        # force-broken: that pass only measures where the natural breaks fall.
+        rolling_target = statistics.median(recent) if recent else target_seconds
+        force_reference = 0.0
+        if target_seconds:
+            force_reference = max(rolling_target or target_seconds, target_seconds)
+        over_long = bool(
+            force_reference
+            and seconds >= FORCE_LENGTH_MULTIPLIER * force_reference
+            and count >= MIN_FORCE_WORDS
+        )
+
+        # A phrase can end on a comma or full stop with almost no pause, as long
+        # as the line has some words in it already.
+        phrase_break = (
+            count >= PUNCT_BREAK_MIN_WORDS
+            and _punct_weight(str(words[index].get("word", ""))) > 0.0
+        )
+
+        if (
+            gaps[index] >= silence_threshold
+            or phrase_break
+            or likelihoods[index] >= threshold
+        ):
+            # A natural break: a clear pause or a likely-enough boundary.
             lines.append(words[start : index + 1])
-            recent_lengths.append(float(words[index]["end"]) - float(words[start]["start"]))
-            if len(recent_lengths) > LINE_WINDOW:
-                recent_lengths.pop(0)
+            recent.append(seconds)
+            if len(recent) > LINE_WINDOW:
+                recent.pop(0)
             start = index + 1
+            threshold = _rolling_threshold(recent, target_seconds)
+        elif over_long:
+            # No seam here, but the line has grown too long: break it at its
+            # strongest internal boundary so consistent line sizes are kept.
+            cut = _best_likely_boundary(words, gaps, likelihoods, start, index)
+            lines.append(words[start : cut + 1])
+            recent.append(float(words[cut]["end"]) - float(words[start]["start"]))
+            if len(recent) > LINE_WINDOW:
+                recent.pop(0)
+            start = cut + 1
+            index = cut + 1
+            threshold = _rolling_threshold(recent, target_seconds)
+            continue
 
         index += 1
 
@@ -341,19 +590,12 @@ def group_words_into_lines(
     max_line_seconds: float = MAX_LINE_SECONDS,
     max_line_words: int = MAX_LINE_WORDS,
 ) -> list[list[dict[str, Any]]]:
-    """Split aligned words into lyric lines from a weighted break score.
+    """Split aligned words into lyric lines with a four-stage break model.
 
-    Rather than any single trigger, every signal is combined into one score for
-    each word boundary — the size of the pause, how that pause compares to the
-    singer's surrounding gaps, whether the word ends a sentence or clause, and
-    whether the line has grown longer than the lines around it. The boundary
-    breaks when the combined score clears zero, so a comma or a full stop can
-    tip an otherwise ordinary pause into a break, and a long line can break with
-    no punctuation at all.
-
-    Two passes are used: the first learns the typical line length, the second
-    adds the nearby-line signal. Lines never exceed ``max_line_seconds`` /
-    ``max_line_words``.
+    Every gap first gets a seed break likelihood from the pause size and the
+    word's punctuation; a rhyme pass, a line-length pass and a rolling threshold
+    pass then adjust and commit those breaks. Lines never exceed
+    ``max_line_seconds`` / ``max_line_words``.
 
     Pure Python and dependency-free so it can be unit tested without a GPU.
     """
@@ -365,13 +607,24 @@ def group_words_into_lines(
 
     gaps = _word_gaps(words)
 
-    first_pass = _segment_lines(
-        words, gaps, silence_threshold, None, max_line_seconds, max_line_words
+    # First pass: raw seeds only, to learn how long a typical line is here.
+    seeded = _seed_break_probabilities(words, gaps, silence_threshold)
+    first_pass = _select_lines(
+        words, gaps, seeded, silence_threshold, None, max_line_seconds, max_line_words
     )
-    nearby_seconds = _median_line_seconds(first_pass)
+    target_seconds = _median_line_seconds(first_pass)
 
-    return _segment_lines(
-        words, gaps, silence_threshold, nearby_seconds, max_line_seconds, max_line_words
+    # Second pass: rhyme + line-length adjustment, then the rolling threshold.
+    adjusted = _apply_rhyme_scheme(words, seeded)
+    adjusted = _apply_line_length_consistency(words, gaps, adjusted, target_seconds)
+    return _select_lines(
+        words,
+        gaps,
+        adjusted,
+        silence_threshold,
+        target_seconds,
+        max_line_seconds,
+        max_line_words,
     )
 
 
@@ -692,7 +945,7 @@ def process_song_session(
     _empty_cuda_cache(torch)
 
     # ------------------------------------------------------------------
-    # 3. Group words into lines (pause threshold)
+    # 3. Group words into lines (four-stage break model)
     # ------------------------------------------------------------------
     grouped_lines = group_words_into_lines(all_words, silence_threshold)
 

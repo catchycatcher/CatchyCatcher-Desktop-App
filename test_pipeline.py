@@ -10,8 +10,10 @@ the full orchestration by stubbing out torch / demucs / whisperx / librosa, so
 the returned schema and stem wiring are verified without a GPU.
 """
 
+import json
 import os
 import shutil
+import statistics
 import sys
 import tempfile
 import types
@@ -22,6 +24,7 @@ from unittest import mock
 import numpy as np
 from fastapi.testclient import TestClient
 
+import phonetics
 import pipeline
 import server
 import share_code
@@ -87,6 +90,19 @@ class GroupWordsIntoLinesTests(unittest.TestCase):
         # Gaps wobbling between 0.02s and 0.2s with no punctuation is ordinary
         # timing noise, not phrase boundaries: it must stay on one line.
         gaps = [0.02, 0.18, 0.05, 0.12, 0.2, 0.03, 0.16, 0.08]
+        words = []
+        cursor = 0.0
+        for index, gap in enumerate(gaps):
+            words.append(word(f"w{index}", round(cursor, 3), round(cursor + 0.25, 3)))
+            cursor += 0.25 + gap
+        self.assertEqual(len(pipeline.group_words_into_lines(words, silence_threshold=0.4)), 1)
+
+    def test_modest_gap_variation_stays_on_one_line(self):
+        # Gaps that keep jumping to roughly twice their neighbours, yet stay
+        # well under the threshold, are still just the singer breathing between
+        # words — a scale-free "this pause is long relative to the others" rule
+        # must not turn that ordinary variation into a line break.
+        gaps = [0.1, 0.22, 0.1, 0.1, 0.22, 0.1, 0.1]
         words = []
         cursor = 0.0
         for index, gap in enumerate(gaps):
@@ -165,6 +181,181 @@ class GroupWordsIntoLinesTests(unittest.TestCase):
         lines = pipeline.group_words_into_lines(words, 0.4, max_line_words=3)
         self.assertTrue(all(len(line) <= 3 for line in lines))
         self.assertEqual([w["word"] for line in lines for w in line], [w["word"] for w in words])
+
+
+class BreakModelTests(unittest.TestCase):
+    """The stages of the break model, exercised on their own."""
+
+    def test_bigger_pause_scores_higher(self):
+        words = [word("a", 0.0, 0.3), word("b", 0.4, 0.7), word("c", 1.0, 1.3)]
+        gaps = pipeline._word_gaps(words)  # 0.1 then 0.3
+        probs = pipeline._seed_break_probabilities(words, gaps, 0.4)
+        self.assertLess(probs[0], probs[1])
+        self.assertGreater(probs[1], 0.5)
+
+    def test_pause_at_threshold_is_above_half(self):
+        words = [word("a", 0.0, 0.5), word("b", 0.9, 1.3)]  # 0.4s gap
+        gaps = pipeline._word_gaps(words)
+        probs = pipeline._seed_break_probabilities(words, gaps, 0.4)
+        self.assertGreater(probs[0], 0.5)
+
+    def test_sentence_punctuation_raises_the_seed(self):
+        plain = [word("a", 0.0, 0.3), word("b", 0.45, 0.75)]
+        stopped = [word("a.", 0.0, 0.3), word("b", 0.45, 0.75)]
+        plain_prob = pipeline._seed_break_probabilities(plain, pipeline._word_gaps(plain), 0.4)[0]
+        stop_prob = pipeline._seed_break_probabilities(stopped, pipeline._word_gaps(stopped), 0.4)[0]
+        self.assertGreater(stop_prob, plain_prob)
+
+    @unittest.skipUnless(phonetics.available(), "pronunciation dictionary not installed")
+    def test_near_rhyme_similarity(self):
+        self.assertEqual(pipeline._near_rhyme_similarity("trying", "lying"), 1.0)
+        self.assertEqual(pipeline._near_rhyme_similarity("die", "lie"), 1.0)
+        self.assertGreaterEqual(pipeline._near_rhyme_similarity("pain.", "insane."), 0.8)
+        self.assertEqual(pipeline._near_rhyme_similarity("cat", "dog"), 0.0)
+
+    @unittest.skipUnless(phonetics.available(), "pronunciation dictionary not installed")
+    def test_phonetic_rime_groups_sounding_ends(self):
+        # CMU dictionary rhymes, so the spelling differences converge.
+        self.assertEqual(phonetics.rime("pain."), ("EY", ("N",)))
+        self.assertEqual(phonetics.rime("insane."), ("EY", ("N",)))
+        self.assertEqual(phonetics.rime("masquerade")[0], "EY")
+
+    @unittest.skipUnless(phonetics.available(), "pronunciation dictionary not installed")
+    def test_sound_alike_tolerates_a_mis_heard_word(self):
+        self.assertTrue(phonetics.sound_alike("smile", "smiles"))
+        self.assertTrue(phonetics.sound_alike("die", "dye"))
+        self.assertFalse(phonetics.sound_alike("cat", "dog"))
+
+    def test_rhyme_scheme_reinforces_rhyming_endings(self):
+        words = [
+            word("trying", 0.0, 0.4),
+            word("around", 0.85, 1.2),  # long gap -> candidate ending "trying"
+            word("lying", 1.25, 1.65),
+            word("again", 2.1, 2.5),  # long gap -> candidate ending "lying"
+        ]
+        gaps = pipeline._word_gaps(words)
+        seeded = pipeline._seed_break_probabilities(words, gaps, 0.4)
+        boosted = pipeline._apply_rhyme_scheme(words, seeded)
+        # Both candidate endings are now certain breaks.
+        self.assertGreater(boosted[0], seeded[0])
+        self.assertGreater(boosted[2], seeded[2])
+        self.assertAlmostEqual(boosted[0], 1.0)
+        self.assertAlmostEqual(boosted[2], 1.0)
+
+    def test_rhyme_scheme_ignores_non_rhymes(self):
+        words = [
+            word("cat", 0.0, 0.4),
+            word("around", 0.85, 1.2),
+            word("dog", 1.25, 1.65),
+            word("again", 2.1, 2.5),
+        ]
+        gaps = pipeline._word_gaps(words)
+        seeded = pipeline._seed_break_probabilities(words, gaps, 0.4)
+        self.assertEqual(pipeline._apply_rhyme_scheme(words, seeded), seeded)
+
+    def test_length_pass_does_not_invent_a_weak_break(self):
+        # A long line whose only pause is small: the length pass may not lift a
+        # sub-threshold seam into a line on its own.
+        words = [word(f"w{i}", i * 0.3, i * 0.3 + 0.25) for i in range(6)]
+        gaps = pipeline._word_gaps(words)  # all 0.05s
+        seeded = pipeline._seed_break_probabilities(words, gaps, 0.4)
+        adjusted = pipeline._apply_line_length_consistency(
+            words, gaps, seeded, target_seconds=0.5
+        )
+        self.assertTrue(all(value < 0.5 for value in adjusted))
+
+    def test_rolling_threshold_drifts_with_recent_lines(self):
+        # Long recent lines push the threshold down (break more often)...
+        self.assertLess(
+            pipeline._rolling_threshold([3.0, 3.0], 2.0),
+            pipeline.BASE_BREAK_THRESHOLD,
+        )
+        # ... short recent lines push it up (break less often) ...
+        self.assertGreater(
+            pipeline._rolling_threshold([0.5, 0.5], 2.0),
+            pipeline.BASE_BREAK_THRESHOLD,
+        )
+        # ... and it never leaves its bounds.
+        self.assertGreaterEqual(
+            pipeline._rolling_threshold([100.0], 1.0), pipeline.THRESHOLD_MIN
+        )
+        self.assertLessEqual(
+            pipeline._rolling_threshold([0.01], 1.0), pipeline.THRESHOLD_MAX
+        )
+        self.assertEqual(
+            pipeline._rolling_threshold([], None), pipeline.BASE_BREAK_THRESHOLD
+        )
+
+
+EXAMPLE_WORDS_PATH = (
+    Path(__file__).resolve().parent / "test_fixtures" / "example_words.json"
+)
+
+
+class ExampleSongLineGroupingTests(unittest.TestCase):
+    """Run the real word timeline of ``example.m4a`` through the grouping.
+
+    ``test_fixtures/example_words.json`` is the WhisperX word alignment of the
+    committed example take, captured once. It is a frozen regression case for
+    the whole break model: pauses, punctuation, rhymes and all.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(EXAMPLE_WORDS_PATH, encoding="utf-8") as handle:
+            cls.words = json.load(handle)
+        cls.lines = pipeline.group_words_into_lines(cls.words, 0.4)
+
+    def _texts(self):
+        return [" ".join(w["word"] for w in line) for line in self.lines]
+
+    def test_every_word_is_kept_in_order(self):
+        flattened = [w["word"] for line in self.lines for w in line]
+        self.assertEqual(flattened, [w["word"] for w in self.words])
+
+    def test_no_line_exceeds_the_caps(self):
+        for line in self.lines:
+            self.assertLessEqual(len(line), pipeline.MAX_LINE_WORDS)
+            self.assertLessEqual(
+                line[-1]["end"] - line[0]["start"], pipeline.MAX_LINE_SECONDS
+            )
+
+    def test_break_count_stays_in_a_sane_band(self):
+        # Loose enough to survive small tuning, tight enough to catch the song
+        # collapsing into one run or shattering into fragments.
+        self.assertGreater(len(self.lines), 80)
+        self.assertLess(len(self.lines), 110)
+        self.assertLess(max(len(line) for line in self.lines), 11)
+
+    def test_the_opening_verses_split_on_the_real_phrases(self):
+        # These match the handwritten ground truth line-for-line.
+        texts = self._texts()
+        self.assertEqual(texts[0], "You have that hole still,")
+        self.assertEqual(texts[1], "the one you can't fill")
+        self.assertEqual(texts[2], "But I know you're trying")
+        self.assertEqual(texts[3], "Find a lover,")
+        self.assertEqual(texts[4], "tell her you love her")
+        self.assertEqual(texts[5], "But you're just lying")
+
+    def test_a_long_unpunctuated_sentence_is_not_chopped(self):
+        # No comma or stop to lean on, so a pause sized phrase stays whole.
+        self.assertIn("Hide your hurt and feed your burdens.", self._texts())
+
+    def test_a_comma_ends_a_line_even_without_a_pause(self):
+        # "still," and "you," end lines although the singer runs straight on.
+        texts = self._texts()
+        self.assertEqual(texts[0], "You have that hole still,")
+        self.assertIn("You think no one knows you,", texts)
+
+    def test_repeated_hook_lines_stay_separate(self):
+        texts = self._texts()
+        self.assertEqual(texts[6:9], ["You smile,", "you smile,", "you smile,"])
+        self.assertEqual(texts[10:12], ["You sit here,", "you sit here,"])
+
+    def test_line_lengths_are_centred(self):
+        durations = [line[-1]["end"] - line[0]["start"] for line in self.lines]
+        self.assertGreater(statistics.median(durations), 1.0)
+        self.assertLess(statistics.median(durations), 2.0)
 
 
 class EstimateLineBpmTests(unittest.TestCase):
@@ -468,6 +659,15 @@ class ApiTests(unittest.TestCase):
             return result
 
         return fake
+
+    def test_requests_are_logged(self):
+        with self.assertLogs("catchycatcher.requests", level="INFO") as captured:
+            response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            any("GET /health" in line and "200" in line for line in captured.output),
+            captured.output,
+        )
 
     def test_take_lifecycle(self):
         holder: list = []

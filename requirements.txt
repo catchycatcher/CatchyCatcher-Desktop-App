@@ -33,3 +33,8 @@ gradio<6
 
 # Numerics (torch also depends on numpy, but the pipeline imports it directly)
 numpy
+
+# Phonetics for rhyme detection in line grouping. The CMU pronunciation
+# dictionary; if it is missing the pipeline falls back to a spelling rule
+# instead of failing.
+pronouncing

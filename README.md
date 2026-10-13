@@ -16,10 +16,10 @@ take.m4a ──► Demucs (htdemucs) ──► vocals.m4a + background.m4a
                       WhisperX (medium + wav2vec2 alignment)
                                       │
                                       ▼
-                       group words on a 0.4s pause threshold
+                      group words into lines (break model)
                                       │
                                       ▼
-                           per-line BPM (librosa) ──► JSON
+                          per-line BPM (librosa) ──► JSON
 ```
 
 The full specification lives in [`../SYSTEM_INSTRUCTIONS.md`](../SYSTEM_INSTRUCTIONS.md).
@@ -28,12 +28,14 @@ The full specification lives in [`../SYSTEM_INSTRUCTIONS.md`](../SYSTEM_INSTRUCT
 
 | File | Purpose |
 | --- | --- |
-| `pipeline.py` | `process_song_session()` — the whole DSP/AI pipeline for one take; returns the spec JSON. Caches models between takes. |
+| `pipeline.py` | `process_song_session()` — the whole DSP/AI pipeline for one take; returns the spec JSON. Also holds `group_words_into_lines()`, the four-stage line-break model. Caches models between takes. |
+| `phonetics.py` | Rhyme helpers backed by the CMU pronunciation dictionary (`pronouncing`), with a spelling fallback; used by the line-break model. |
 | `server.py` | FastAPI app: sessions, takes, stem streaming, health. |
 | `run.py` | One-command launcher: sets the environment up if needed, then starts the server and the share tunnel. |
 | `tunnel.py` | Gradio share tunnel, driven by `run.py`. |
 | `share_code.py` | Dependency-free base62 share-code maths (kept out of `tunnel.py` so it is testable). |
-| `test_pipeline.py` | 24 `unittest` tests: grouping, BPM fallback, id sanitising, share codes, the full flow (heavy stack stubbed) and the HTTP API. |
+| `test_pipeline.py` | 58 `unittest` tests: line grouping (including the frozen `example.m4a` timeline), phonetics, BPM fallback, id sanitising, share codes, the full flow (heavy stack stubbed) and the HTTP API. |
+| `test_fixtures/example_words.json` | The WhisperX word timeline of `example.m4a`, captured once, used as the grouping regression case. |
 | `setup_env.py` | One-command cross-platform installer (uv + Python + ffmpeg + deps). |
 | `requirements.txt` | Python dependencies. |
 
@@ -185,6 +187,7 @@ Open `http://<desktop-ip>:8000/docs` for interactive Swagger UI.
 | `CATCHYCATCHER_UPLOAD_DIR` | `./sessions` | Session storage root. |
 | `CATCHYCATCHER_CORS_ORIGINS` | `*` | Comma-separated allowed origins, or `*`. |
 | `CATCHYCATCHER_LOG_LEVEL` | `info` | Uvicorn log level (`run.py` sets `warning` unless `--verbose`). |
+| `CATCHYCATCHER_REQUEST_LOG` | `info` | Level for the per-request log line; `off` silences it. |
 
 Because the frontend is hosted statically (GitHub Pages / `localhost:5173`),
 requests are cross-origin. Lock this down in production, e.g.
@@ -295,8 +298,10 @@ source .venv/bin/activate
 python -m unittest test_pipeline -v
 ```
 
-20 tests, all with the heavy stack stubbed — no GPU, torch, demucs, whisperx or
-librosa required.
+58 tests, all with the heavy stack stubbed — no GPU, torch, demucs, whisperx or
+librosa required. The example-song grouping tests read the committed word
+timeline in `test_fixtures/`, so they are deterministic and offline (the
+dictionary-backed phonetics tests skip themselves if `pronouncing` is absent).
 
 ## Networking
 
@@ -319,11 +324,18 @@ librosa required.
   fight over the 8 GB of VRAM.
 - **Alignment:** WhisperX forced alignment gives millisecond word boundaries;
   words missing `start`/`end` are skipped.
-- **Line grouping:** every word boundary gets a combined break *score* — pause
-  size, how the pause compares to the singer's nearby gaps, sentence/clause
-  punctuation, and how long the line has grown next to the lines around it —
-  and breaks when the total clears a threshold, so commas/full stops can tip an
-  ordinary pause and over-long lines break without one. A two-pass run learns
-  the typical line length first. Tune `silence_threshold` for overall tightness.
+- **Line grouping:** a four-stage break model. Every word boundary first gets a
+  *likelihood* from the pause size (absolute and relative to the singer's other
+  gaps) and the sentence/clause punctuation on the word before it. A rhyme pass
+  then raises endings that near-rhyme with another nearby likely break, a
+  line-length pass nudges gaps toward the size of the surrounding lines, and a
+  final rolling threshold commits the breaks: a clear pause always breaks, an
+  over-long line is cut at its strongest internal seam, and otherwise the
+  threshold drifts to keep the break frequency near the song's typical line.
+  A line ending on a comma or full stop also breaks once it is long enough,
+  even when the singer runs straight through with no pause (a phrase can end on
+  punctuation alone).
+  Tune `silence_threshold` for overall tightness; the weights live in the
+  `Line-grouping model` block at the top of `pipeline.py`.
 - **BPM:** estimated per line from the vocal stem (`start_bpm=110`). Lines
   shorter than `0.5s` (or that fail analysis) fall back to `120.0` bpm.
