@@ -23,8 +23,11 @@ from __future__ import annotations
 import math
 import shutil
 import subprocess
+import wave
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 SAMPLE_RATE = 44100
 CHANNELS = 2
@@ -198,7 +201,8 @@ def build_timeline(
 
     Returns ``(timeline, gaps)`` where ``timeline`` is a list of schema-compatible
     lyric lines (``start time``/``end time``/``words``) with a ``speed``, and
-    ``gaps`` holds the silence inserted between each consecutive pair.
+    ``gaps`` holds the length of the gap inserted between each consecutive pair
+    (filled with the source recordings' own gap audio when rendering).
     """
     _with_ratios(entries)
     speeds = _line_speeds(entries)
@@ -309,6 +313,78 @@ def concat_command(list_file: Path, out: Path) -> list[str]:
     ]
 
 
+def _read_wav(path: str | Path) -> "np.ndarray":
+    """Read a PCM WAV into a ``(frames, channels)`` float32 array."""
+    with wave.open(str(path), "rb") as handle:
+        channels = handle.getnchannels()
+        frames = handle.readframes(handle.getnframes())
+    samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32)
+    if channels > 1:
+        return samples.reshape(-1, channels)
+    return samples.reshape(-1, 1)
+
+
+def _write_wav(path: str | Path, samples: "np.ndarray", rate: int) -> None:
+    clipped = np.clip(samples, -32768, 32767).astype(np.int16)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(clipped.shape[1] if clipped.ndim > 1 else 1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(clipped.tobytes())
+
+
+def _pad_after(samples: "np.ndarray", target: int) -> "np.ndarray":
+    length = samples.shape[0]
+    if length == target:
+        return samples
+    if length > target:
+        return samples[:target]
+    pad = np.zeros((target - length, samples.shape[1]), dtype=np.float32)
+    return np.concatenate([samples, pad], axis=0)
+
+
+def _pad_before(samples: "np.ndarray", target: int) -> "np.ndarray":
+    length = samples.shape[0]
+    if length == target:
+        return samples
+    if length > target:
+        return samples[-target:]
+    pad = np.zeros((target - length, samples.shape[1]), dtype=np.float32)
+    return np.concatenate([pad, samples], axis=0)
+
+
+def _blend_gaps(
+    earlier: "np.ndarray | None", later: "np.ndarray | None", target: int
+) -> "np.ndarray":
+    """Blend the tail of the earlier gap into the head of the later one.
+
+    Both gaps are the *silent stretches* of their own recordings, so this keeps
+    the breaths/room tone that actually followed and preceded the lines, fading
+    them through each other instead of dropping in digital silence.
+    """
+    if earlier is None and later is None:
+        return np.zeros((target, CHANNELS), dtype=np.float32)
+    if earlier is None:
+        return _pad_before(later, target)
+    if later is None:
+        return _pad_after(earlier, target)
+
+    channels = earlier.shape[1]
+    if earlier.shape[0] + later.shape[0] <= target:
+        return _pad_after(np.concatenate([earlier, later], axis=0), target)
+
+    overlap = earlier.shape[0] + later.shape[0] - target
+    overlap = max(1, min(overlap, earlier.shape[0], later.shape[0]))
+    fade = np.linspace(1.0, 0.0, overlap, dtype=np.float32).reshape(-1, 1)
+    head = earlier[: earlier.shape[0] - overlap]
+    tail = later[overlap:]
+    middle = earlier[earlier.shape[0] - overlap :] * fade + later[:overlap] * (1.0 - fade)
+    blended = np.concatenate([head, middle, tail], axis=0)
+    if blended.shape[1] != channels:
+        blended = blended[:, :CHANNELS]
+    return _pad_after(blended, target)
+
+
 def _run(command: list[str]) -> None:
     subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -317,6 +393,11 @@ def render(
     entries: list[dict[str, Any]], output_dir: str | Path
 ) -> tuple[list[dict[str, Any]], list[float], Path]:
     """Render the whole scrapbook into ``<output_dir>/mix.m4a``.
+
+    The gap between two lines is filled with the audio that actually followed
+    the first line and preceded the second in their own recordings (their
+    ``gap_after`` / ``gap_before`` stretches), cross-faded together — never
+    running into the neighbouring line of either source take.
 
     Returns the timeline, the gaps, and the path to the written mix. Raises
     ``ValueError`` when there is nothing to render.
@@ -343,8 +424,42 @@ def render(
         parts.append(line_path)
 
         if index < len(gaps) and gaps[index] > 0.001:
+            following = entries[index + 1]
+            target = max(1, int(round(gaps[index] * SAMPLE_RATE)))
+
+            earlier: "np.ndarray | None" = None
+            gap_after = entry.get("gap_after")
+            if gap_after is not None and float(gap_after) > 0.02:
+                earlier_path = work / f"gap_{index:04d}_a.wav"
+                _run(
+                    extract_command(
+                        entry["vocals"], float(entry["end"]), float(gap_after), speed, earlier_path
+                    )
+                )
+                read = _read_wav(earlier_path)
+                earlier = read if read.shape[0] else None
+
+            later: "np.ndarray | None" = None
+            gap_before = following.get("gap_before")
+            if gap_before is not None and float(gap_before) > 0.02:
+                later_path = work / f"gap_{index:04d}_b.wav"
+                _run(
+                    extract_command(
+                        following["vocals"],
+                        float(following["start"]) - float(gap_before),
+                        float(gap_before),
+                        speeds[index + 1],
+                        later_path,
+                    )
+                )
+                read = _read_wav(later_path)
+                later = read if read.shape[0] else None
+
             gap_path = work / f"gap_{index:04d}.wav"
-            _run(silence_command(gaps[index], gap_path))
+            if earlier is None and later is None:
+                _run(silence_command(gaps[index], gap_path))
+            else:
+                _write_wav(gap_path, _blend_gaps(earlier, later, target), SAMPLE_RATE)
             parts.append(gap_path)
 
     list_file = work / "concat.txt"

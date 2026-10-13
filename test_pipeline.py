@@ -830,6 +830,27 @@ class LineRetimeTests(unittest.TestCase):
         self.assertEqual(server._syllables("make"), 1)
 
 
+class GapBlendTests(unittest.TestCase):
+    """The scrapbook fills gaps with the source recordings' own gap audio."""
+
+    def test_blend_returns_exact_length(self):
+        a = np.full((1000, 2), 0.5, dtype=np.float32)
+        b = np.full((800, 2), -0.5, dtype=np.float32)
+        for target in (50, 500, 1200, 2000, 4000):
+            self.assertEqual(scrapbook._blend_gaps(a, b, target).shape, (target, 2))
+        self.assertEqual(scrapbook._blend_gaps(None, b, 3000).shape, (3000, 2))
+        self.assertEqual(scrapbook._blend_gaps(a, None, 50).shape, (50, 2))
+        self.assertEqual(scrapbook._blend_gaps(None, None, 400).shape, (400, 2))
+
+    def test_wav_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "clip.wav"
+            samples = (np.random.rand(500, 2) * 2000 - 1000).astype(np.float32)
+            scrapbook._write_wav(path, samples, scrapbook.SAMPLE_RATE)
+            back = scrapbook._read_wav(path)
+            self.assertEqual(back.shape, (500, 2))
+
+
 class ApiTests(unittest.TestCase):
     """HTTP-level tests for session/take organisation, with the pipeline stubbed."""
 
