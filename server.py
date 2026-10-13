@@ -1290,59 +1290,93 @@ def _scrapbook_meta_path(session_id: str, scrapbook_id: str) -> Path:
 SECTION_TYPES = ("chorus", "verse", "bridge", "other")
 
 
-def _normalize_lines(lines: Any) -> list[dict[str, Any]]:
-    """Validate scrapbook lines, snapshotting each one as it is added.
+def _normalize_line_ref(ref: Any) -> dict[str, Any] | None:
+    """Validate one bare line, snapshotting it if it arrived without ``data``."""
+    if not isinstance(ref, dict):
+        return None
+    session_id = str(ref.get("session_id", "")).strip()
+    take_id = str(ref.get("take_id", "")).strip()
+    try:
+        line_index = int(ref.get("line_index", -1))
+    except (TypeError, ValueError):
+        return None
+    if not session_id or not take_id or line_index < 0:
+        return None
 
-    A line sent without ``data`` is resolved from the journal *now* and its
+    sid = sanitize_id(session_id)
+    tid = sanitize_id(take_id)
+    data = ref.get("data")
+    if not isinstance(data, dict):
+        try:
+            resolved = _line_data({"session_id": sid, "take_id": tid, "line_index": line_index})
+        except HTTPException:
+            return None
+        data = {key: value for key, value in resolved.items() if key != "vocals"}
+    return {"session_id": sid, "take_id": tid, "line_index": line_index, "data": data}
+
+
+def _normalize_group(entry: Any) -> dict[str, Any] | None:
+    """Validate a section group: ``{group: {id, type, name}, lines: [...]}``."""
+    if not isinstance(entry, dict):
+        return None
+    group = entry.get("group")
+    if not isinstance(group, dict) or group.get("type") not in SECTION_TYPES:
+        return None
+    group_id = str(group.get("id", "")).strip()[:64]
+    if not group_id:
+        return None
+    name = str(group.get("name", "")).strip()
+    inner: list[dict[str, Any]] = []
+    for line in entry.get("lines") or []:
+        normalized = _normalize_line_ref(line)
+        if normalized:
+            inner.append(normalized)
+    if not inner:
+        return None
+    return {
+        "group": {
+            "id": group_id,
+            "type": str(group["type"]),
+            "name": _clean_name(name or str(group["type"]).capitalize(), str(group["type"])),
+        },
+        "lines": inner,
+    }
+
+
+def _normalize_lines(lines: Any) -> list[dict[str, Any]]:
+    """Validate scrapbook entries, snapshotting each line as it is added.
+
+    An entry is either a bare line or a section group (``{group, lines}``). A
+    line sent without ``data`` is resolved from the journal *now* and its
     words/timings are stored with it, so later edits to the journal (including
-    re-splitting) cannot change a scrapbook that already contains it.
+    re-splitting) cannot change a scrapbook that already holds it.
     """
     if not isinstance(lines, list):
         return []
     normalized: list[dict[str, Any]] = []
-    for ref in lines:
-        if not isinstance(ref, dict):
+    for entry in lines:
+        if isinstance(entry, dict) and isinstance(entry.get("group"), dict):
+            group = _normalize_group(entry)
+            if group:
+                normalized.append(group)
             continue
-        session_id = str(ref.get("session_id", "")).strip()
-        take_id = str(ref.get("take_id", "")).strip()
-        try:
-            line_index = int(ref.get("line_index", -1))
-        except (TypeError, ValueError):
-            continue
-        if not session_id or not take_id or line_index < 0:
-            continue
-
-        sid = sanitize_id(session_id)
-        tid = sanitize_id(take_id)
-        data = ref.get("data")
-        if not isinstance(data, dict):
-            try:
-                resolved = _line_data(
-                    {"session_id": sid, "take_id": tid, "line_index": line_index}
-                )
-            except HTTPException:
-                continue
-            data = {key: value for key, value in resolved.items() if key != "vocals"}
-        entry: dict[str, Any] = {
-            "session_id": sid,
-            "take_id": tid,
-            "line_index": line_index,
-            "data": data,
-        }
-        # Optional section grouping (chorus/verse/bridge/other). Purely visual, so
-        # it is carried through untouched and kept out of the render signature.
-        group = ref.get("group")
-        if isinstance(group, dict) and group.get("type") in SECTION_TYPES:
-            group_id = str(group.get("id", "")).strip()[:64]
-            if group_id:
-                name = str(group.get("name", "")).strip()
-                entry["group"] = {
-                    "id": group_id,
-                    "type": str(group["type"]),
-                    "name": _clean_name(name or str(group["type"]).capitalize(), str(group["type"])),
-                }
-        normalized.append(entry)
+        line = _normalize_line_ref(entry)
+        if line:
+            normalized.append(line)
     return normalized
+
+
+def _expand_lines(lines: Any) -> list[dict[str, Any]]:
+    """Flatten the entry list into the line sequence that actually plays."""
+    expanded: list[dict[str, Any]] = []
+    if not isinstance(lines, list):
+        return expanded
+    for entry in lines:
+        if isinstance(entry, dict) and isinstance(entry.get("group"), dict):
+            expanded.extend(entry.get("lines") or [])
+        elif isinstance(entry, dict):
+            expanded.append(entry)
+    return expanded
 
 
 def _scrapbook_entry(ref: dict[str, Any]) -> dict[str, Any]:
@@ -1364,11 +1398,8 @@ def _scrapbook_entry(ref: dict[str, Any]) -> dict[str, Any]:
 
 
 def _scrapbook_signature(lines: list[dict[str, Any]]) -> str:
-    # Section groups are visual only, so they must not invalidate a cached render.
-    payload = json.dumps(
-        {"lines": [{key: value for key, value in ref.items() if key != "group"} for ref in lines]},
-        sort_keys=True,
-    )
+    # Grouping is visual: the mix only depends on the flattened line sequence.
+    payload = json.dumps({"lines": _expand_lines(lines)}, sort_keys=True)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
@@ -1383,7 +1414,7 @@ def _scrapbook_summary(meta: dict[str, Any]) -> dict[str, Any]:
     return {
         "scrapbook_id": meta.get("scrapbook_id"),
         "name": meta.get("name"),
-        "line_count": len(meta.get("lines") or []),
+        "line_count": len(_expand_lines(meta.get("lines") or [])),
         "created_at": meta.get("created_at"),
         "updated_at": meta.get("updated_at"),
         "rendered": bool(meta.get("render")),
@@ -1432,6 +1463,7 @@ def _line_data(ref: dict[str, Any]) -> dict[str, Any]:
 def _render_scrapbook(session_id: str, meta: dict[str, Any]) -> dict[str, Any]:
     sid = str(meta["scrapbook_id"])
     lines = meta.get("lines") or []
+    expanded = _expand_lines(lines)
     signature = _scrapbook_signature(lines)
     book_dir = _scrapbook_dir(session_id, sid)
     mix = book_dir / "mix.m4a"
@@ -1440,10 +1472,10 @@ def _render_scrapbook(session_id: str, meta: dict[str, Any]) -> dict[str, Any]:
     if isinstance(cached, dict) and cached.get("signature") == signature and mix.is_file():
         return cached
 
-    if not lines:
+    if not expanded:
         raise HTTPException(status_code=400, detail="Add at least one line before rendering.")
 
-    entries = [_scrapbook_entry(ref) for ref in lines]
+    entries = [_scrapbook_entry(ref) for ref in expanded]
     with PROCESS_LOCK:
         timeline, gaps, _mix = scrapbook.render(entries, book_dir)
 

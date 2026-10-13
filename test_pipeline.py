@@ -1334,33 +1334,39 @@ class ApiTests(unittest.TestCase):
                 "name": "G",
                 "lines": [
                     {
-                        "session_id": "grp",
-                        "take_id": "t",
-                        "line_index": 0,
-                        "group": {"id": "g1", "type": "chorus"},
+                        "group": {"id": "g1", "type": "chorus", "name": "Chorus 1"},
+                        "lines": [{"session_id": "grp", "take_id": "t", "line_index": 0}],
                     },
                     {"session_id": "grp", "take_id": "t", "line_index": 0},
                     {
-                        "session_id": "grp",
-                        "take_id": "t",
-                        "line_index": 0,
                         "group": {"id": "g2", "type": "bogus"},
+                        "lines": [{"session_id": "grp", "take_id": "t", "line_index": 0}],
                     },
                 ],
             },
         ).json()["scrapbook_id"]
 
-        lines = self.client.get(f"/sessions/grp/scrapbooks/{sid}").json()["lines"]
-        self.assertEqual(lines[0]["group"], {"id": "g1", "type": "chorus", "name": "Chorus"})
+        body = self.client.get(f"/sessions/grp/scrapbooks/{sid}").json()
+        lines = body["lines"]
+        # The invalid group type is dropped, leaving the chorus and the bare line.
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0]["group"]["type"], "chorus")
+        self.assertEqual(lines[0]["group"]["name"], "Chorus 1")
+        self.assertEqual(lines[0]["lines"][0]["line_index"], 0)
         self.assertNotIn("group", lines[1])
-        # An unknown section type is dropped.
-        self.assertNotIn("group", lines[2])
+        # line_count counts the flattened lines.
+        self.assertEqual(body["line_count"], 2)
 
     def test_scrapbook_signature_ignores_groups(self):
-        base = [{"session_id": "s", "take_id": "t", "line_index": 0, "data": {}}]
-        grouped = [{**base[0], "group": {"id": "g", "type": "verse"}}]
+        bare = [{"session_id": "s", "take_id": "t", "line_index": 0, "data": {}}]
+        grouped = [
+            {
+                "group": {"id": "g", "type": "verse", "name": "Verse"},
+                "lines": [{"session_id": "s", "take_id": "t", "line_index": 0, "data": {}}],
+            }
+        ]
         self.assertEqual(
-            server._scrapbook_signature(base), server._scrapbook_signature(grouped)
+            server._scrapbook_signature(bare), server._scrapbook_signature(grouped)
         )
 
 
