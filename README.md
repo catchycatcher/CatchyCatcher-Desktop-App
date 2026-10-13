@@ -192,7 +192,6 @@ Open `http://<desktop-ip>:8000/docs` for interactive Swagger UI.
 | `CATCHYCATCHER_UPLOAD_DIR` | `./sessions` | Session storage root. |
 | `CATCHYCATCHER_CORS_ORIGINS` | `*` | Comma-separated allowed origins, or `*`. |
 | `CATCHYCATCHER_LOG_LEVEL` | `info` | Uvicorn log level (`run.py` sets `warning` unless `--verbose`). |
-| `CATCHYCATCHER_REQUEST_LOG` | `info` | Level for the per-request log line; `off` silences it. |
 
 Because the frontend is hosted statically (GitHub Pages / `localhost:5173`),
 requests are cross-origin. Lock this down in production, e.g.

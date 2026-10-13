@@ -111,8 +111,6 @@ Configuration is via environment variables:
 ``CATCHYCATCHER_CORS_ORIGINS`` Comma-separated origins, or ``*`` (default).
 ``CATCHYCATCHER_LOG_LEVEL``    Uvicorn log level (default ``info``; ``run.py``
                                uses ``warning`` unless ``--verbose``).
-``CATCHYCATCHER_REQUEST_LOG``  Level for the per-request log line (default
-                               ``info``); ``off`` silences it.
 ============================== ==================================================
 """
 
@@ -121,12 +119,10 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
-import logging
 import os
 import re
 import shutil
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -167,47 +163,8 @@ else:
     ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 # ---------------------------------------------------------------------------
-# Request logging
+# Server app
 # ---------------------------------------------------------------------------
-#
-# Every request is written to ``catchycatcher.requests`` as it completes, so it
-# is obvious when the laptop frontend (or the share tunnel) actually reaches the
-# API, and how long the server took to answer. On by default; set
-# ``CATCHYCATCHER_REQUEST_LOG=off`` to silence it. The logger gets its own
-# handler rather than relying on uvicorn's logging config, so it works whichever
-# way the server is started (``python server.py``, ``python run.py``, uvicorn).
-
-_LOG_LEVELS = {
-    "critical": logging.CRITICAL,
-    "error": logging.ERROR,
-    "warning": logging.WARNING,
-    "info": logging.INFO,
-    "debug": logging.DEBUG,
-}
-
-_REQUEST_LOG_LEVEL = os.environ.get("CATCHYCATCHER_REQUEST_LOG", "info").strip().lower()
-request_logger = logging.getLogger("catchycatcher.requests")
-
-
-def _configure_request_logging() -> None:
-    level = _LOG_LEVELS.get(_REQUEST_LOG_LEVEL)
-    if level is None:
-        # Anything else (notably "off"/"none") disables request logging.
-        request_logger.disabled = True
-        return
-    request_logger.setLevel(level)
-    request_logger.propagate = False
-    if not request_logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S"
-            )
-        )
-        request_logger.addHandler(handler)
-
-
-_configure_request_logging()
 
 # Demucs + WhisperX both want the whole GPU; serialize takes so two uploads
 # cannot fight over VRAM and OOM each other.
@@ -232,38 +189,6 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Session-Id", "X-Take-Id"],
 )
-
-
-@app.middleware("http")
-async def log_request(request: Request, call_next):
-    """Log a one-line summary of every request once it has been handled."""
-    started = time.perf_counter()
-    client = request.client.host if request.client else "-"
-    target = request.url.path
-    if request.url.query:
-        target = f"{target}?{request.url.query}"
-
-    try:
-        response = await call_next(request)
-    except Exception:
-        request_logger.exception(
-            "%s %s from %s -> unhandled error (%.1f ms)",
-            request.method,
-            target,
-            client,
-            (time.perf_counter() - started) * 1000,
-        )
-        raise
-
-    request_logger.info(
-        "%s %s from %s -> %d (%.1f ms)",
-        request.method,
-        target,
-        client,
-        response.status_code,
-        (time.perf_counter() - started) * 1000,
-    )
-    return response
 
 
 # ---------------------------------------------------------------------------

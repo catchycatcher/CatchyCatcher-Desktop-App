@@ -865,15 +865,6 @@ class ApiTests(unittest.TestCase):
 
         return fake
 
-    def test_requests_are_logged(self):
-        with self.assertLogs("catchycatcher.requests", level="INFO") as captured:
-            response = self.client.get("/health")
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(
-            any("GET /health" in line and "200" in line for line in captured.output),
-            captured.output,
-        )
-
     def test_take_lifecycle(self):
         holder: list = []
         with mock.patch.object(
