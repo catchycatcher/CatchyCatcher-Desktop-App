@@ -781,6 +781,55 @@ class ScrapbookTimelineTests(unittest.TestCase):
         self.assertIn("-ss", command)
 
 
+class LineRetimeTests(unittest.TestCase):
+    """Guessing word timings for an edited line, anchored on shared words."""
+
+    def test_matches_anchors_and_guesses_new_words(self):
+        original = [
+            {"word": "hello", "start": 0.0, "end": 0.4, "length": 0.4},
+            {"word": "world", "start": 0.6, "end": 1.0, "length": 0.4},
+        ]
+        words = server._retime_words(original, "hello big world", 0.0, 1.0)
+        self.assertEqual([w["word"] for w in words], ["hello", "big", "world"])
+        self.assertEqual((words[0]["start"], words[0]["end"]), (0.0, 0.4))
+        self.assertAlmostEqual(words[1]["start"], 0.4, places=2)
+        self.assertAlmostEqual(words[1]["end"], 0.6, places=2)
+        self.assertEqual((words[2]["start"], words[2]["end"]), (0.6, 1.0))
+
+    def test_ignores_punctuation_when_matching(self):
+        original = [
+            {"word": "hello,", "start": 0.0, "end": 0.4, "length": 0.4},
+            {"word": "world.", "start": 0.6, "end": 1.0, "length": 0.4},
+        ]
+        words = server._retime_words(original, "hello world", 0.0, 1.0)
+        self.assertEqual([w["word"] for w in words], ["hello", "world"])
+        self.assertEqual((words[0]["start"], words[0]["end"]), (0.0, 0.4))
+        self.assertEqual((words[1]["start"], words[1]["end"]), (0.6, 1.0))
+
+    def test_inserted_word_between_jammed_anchors_still_gets_time(self):
+        original = [
+            {"word": "a", "start": 0.0, "end": 0.5, "length": 0.5},
+            {"word": "b", "start": 0.5, "end": 1.0, "length": 0.5},
+        ]
+        words = server._retime_words(original, "a cat b", 0.0, 1.0)
+        self.assertEqual([w["word"] for w in words], ["a", "cat", "b"])
+        self.assertGreater(words[1]["length"], 0.0)
+        self.assertLessEqual(words[0]["end"], words[1]["start"])
+        self.assertLessEqual(words[1]["end"], words[2]["start"])
+
+    def test_without_anchors_spreads_by_syllables(self):
+        words = server._retime_words([], "la la la", 0.0, 0.9)
+        self.assertEqual(len(words), 3)
+        self.assertAlmostEqual(words[0]["start"], 0.0, places=2)
+        self.assertAlmostEqual(words[-1]["end"], 0.9, places=2)
+
+    def test_syllable_counting(self):
+        self.assertEqual(server._syllables("cat"), 1)
+        self.assertEqual(server._syllables("hello"), 2)
+        self.assertEqual(server._syllables("banana"), 3)
+        self.assertEqual(server._syllables("make"), 1)
+
+
 class ApiTests(unittest.TestCase):
     """HTTP-level tests for session/take organisation, with the pipeline stubbed."""
 
@@ -1123,6 +1172,38 @@ class ApiTests(unittest.TestCase):
 
         off = self.client.patch("/sessions/bm/takes/t", params={"bookmarked": "false"})
         self.assertFalse(off.json()["bookmarked"])
+
+    def test_update_line_text(self):
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            self.client.post(
+                "/sessions/txt/takes/t", files={"file": ("t.m4a", b"x", "audio/mp4")}
+            )
+        resp = self.client.patch(
+            "/sessions/txt/takes/t/lines/0", params={"text": "  new words here  "}
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        line = resp.json()["line"]
+        self.assertEqual(line["text"], "new words here")
+        self.assertEqual([w["word"] for w in line["words"]], ["new", "words", "here"])
+        # The line's words are all inside its span and ordered.
+        self.assertGreaterEqual(line["words"][0]["start"], line["start time"])
+        self.assertLessEqual(line["words"][-1]["end"], line["end time"])
+
+        take = self.client.get("/sessions/txt/takes/t").json()
+        self.assertEqual(take["result"]["lyrics"][0]["text"], "new words here")
+
+        # Clearing restores the original words and drops the override.
+        cleared = self.client.patch("/sessions/txt/takes/t/lines/0", params={"text": ""})
+        restored = cleared.json()["line"]
+        self.assertNotIn("text", restored)
+        self.assertEqual([w["word"] for w in restored["words"]], ["hi"])
+
+        self.assertEqual(
+            self.client.patch("/sessions/txt/takes/t/lines/9", params={"text": "x"}).status_code,
+            404,
+        )
 
     def test_scrapbook_lifecycle_and_render(self):
         with mock.patch.object(

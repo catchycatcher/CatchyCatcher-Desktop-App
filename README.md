@@ -289,6 +289,7 @@ headers.
 | `GET` | `/sessions/{session_id}` | Manifest: the session `name`, then every take in order with status. |
 | `GET` | `/sessions/{session_id}/takes/{take_id}` | One take's metadata + result. |
 | `PATCH` | `/sessions/{session_id}/takes/{take_id}` | Rename an entry and/or toggle its bookmark (`?name=…`, `?bookmarked=true|false`). |
+| `PATCH` | `/sessions/{session_id}/takes/{take_id}/lines/{line_index}` | Rewrite a line from edited `?text=…`: words shared with the original anchor the timing and new words are guessed by syllable count; empty restores the pipeline words. |
 | `POST` | `/sessions/{session_id}/takes/{take_id}/process` | Process a take that was stored with `process=false`. |
 | `GET` | `/sessions/{session_id}/takes/{take_id}/audio/{stem}` | Stream `vocals` or `background` (`audio/mp4`). |
 | `GET` | `/sessions/{session_id}/takes/{take_id}/original` | Stream the raw recording, processed or not. |

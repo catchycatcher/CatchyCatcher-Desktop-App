@@ -22,6 +22,8 @@ Endpoints
     Process a take that was previously stored unprocessed.
 ``PATCH  /sessions/{session_id}/takes/{take_id}``
     Rename a journal entry and/or toggle its ``bookmarked`` flag.
+``PATCH  /sessions/{session_id}/takes/{take_id}/lines/{line_index}``
+    Set (or clear) a line's display ``text`` override; timings are untouched.
 ``GET    /sessions``
     List stored sessions as ``{"id", "name", "updated_at"}`` objects, ordered by
     id.
@@ -80,6 +82,7 @@ Configuration is via environment variables:
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import logging
@@ -534,6 +537,7 @@ def root() -> dict[str, Any]:
             "GET /sessions/{session_id}",
             "GET /sessions/{session_id}/takes/{take_id}",
             "PATCH /sessions/{session_id}/takes/{take_id}",
+            "PATCH /sessions/{session_id}/takes/{take_id}/lines/{line_index}",
             "GET /sessions/{session_id}/takes/{take_id}/audio/{stem}",
             "GET /sessions/{session_id}/takes/{take_id}/original",
             "DELETE /sessions/{session_id}/takes/{take_id}",
@@ -614,6 +618,158 @@ def update_take(
         "name": meta.get("name"),
         "bookmarked": bool(meta.get("bookmarked", False)),
     }
+
+
+_VOWELS = "aeiouy"
+
+
+def _normalize_token(token: str) -> str:
+    return re.sub(r"[^a-z0-9']", "", str(token).lower())
+
+
+def _syllables(token: str) -> int:
+    word = re.sub(r"[^a-z]", "", str(token).lower())
+    if not word:
+        return 1
+    groups = re.findall(r"[aeiouy]+", word)
+    count = len(groups)
+    if word.endswith("e") and count > 1 and not word.endswith(("le", "ee", "ye")):
+        count -= 1
+    return max(1, count)
+
+
+def _retime_words(
+    original_words: list[dict[str, Any]], new_text: str, line_start: float, line_end: float
+) -> list[dict[str, Any]]:
+    """Guess per-word timings for an edited line.
+
+    Words present in both the original and the edit are anchors (their original
+    times are kept); the words between them are guessed by spreading the
+    available time in proportion to their syllable counts. When two anchors are
+    jammed together (no room for the inserted words) a little time is borrowed
+    from those anchors so the new words still get a slice.
+    """
+    tokens = [token for token in new_text.split() if token]
+    if not tokens:
+        return []
+
+    original = [
+        (str(word.get("word", "")), float(word["start"]), float(word["end"]))
+        for word in original_words
+        if "start" in word and "end" in word
+    ]
+    matcher = difflib.SequenceMatcher(
+        a=[_normalize_token(word) for word, _start, _end in original],
+        b=[_normalize_token(token) for token in tokens],
+        autojunk=False,
+    )
+    times: list[tuple[float, float] | None] = [None] * len(tokens)
+    for first, second, size in matcher.get_matching_blocks():
+        for step in range(size):
+            times[second + step] = (original[first + step][1], original[first + step][2])
+
+    total = len(tokens)
+    index = 0
+    while index < total:
+        if times[index] is not None:
+            index += 1
+            continue
+        end = index
+        while end < total and times[end] is None:
+            end += 1
+
+        previous = times[index - 1] if index > 0 else None
+        following = times[end] if end < total else None
+        left = previous[1] if previous else line_start
+        right = following[0] if following else line_end
+        span = right - left
+
+        syllables = [_syllables(token) for token in tokens[index:end]]
+        weight = sum(syllables) or (end - index)
+
+        if span <= 0.02 and previous is not None and following is not None:
+            # No room between the anchors: borrow a little from both of them.
+            borrowed = [_syllables(tokens[index - 1])] + syllables + [_syllables(tokens[end])]
+            borrowed_total = sum(borrowed)
+            borrowed_span = following[1] - previous[0]
+            cursor = previous[0]
+            allocated: list[tuple[float, float]] = []
+            for value in borrowed:
+                share = borrowed_span * (value / borrowed_total) if borrowed_total else 0.0
+                allocated.append((cursor, cursor + share))
+                cursor += share
+            times[index - 1] = allocated[0]
+            for offset in range(index, end):
+                times[offset] = allocated[1 + (offset - index)]
+            times[end] = allocated[-1]
+            index = end
+            continue
+
+        cursor = left
+        for offset in range(index, end):
+            share = span * (syllables[offset - index] / weight) if weight else 0.0
+            times[offset] = (cursor, cursor + share)
+            cursor += share
+        index = end
+
+    result: list[dict[str, Any]] = []
+    for token, bounds in zip(tokens, times):
+        start, finish = bounds if bounds is not None else (line_start, line_start)
+        finish = max(start, finish)
+        result.append(
+            {
+                "word": token,
+                "start": round(start, 3),
+                "end": round(finish, 3),
+                "length": round(finish - start, 3),
+            }
+        )
+    return result
+
+
+@app.patch("/sessions/{session_id}/takes/{take_id}/lines/{line_index}")
+def update_line_text(
+    session_id: str,
+    take_id: str,
+    line_index: int,
+    text: str = Query(
+        default="",
+        max_length=2000,
+        description="New line text; empty restores the pipeline words.",
+    ),
+) -> dict[str, Any]:
+    """Rewrite one lyric line's words from edited text.
+
+    The words shared with the original are used as timing anchors and the rest
+    are guessed by syllable count, so the stored per-word timings actually
+    reflect what the line now says. Clearing the text restores the originals.
+    """
+    sid = sanitize_id(session_id)
+    tid = sanitize_id(take_id)
+    result_path = _take_dir(sid, tid) / "result.json"
+    result = _read_json(result_path)
+    lyrics = result.get("lyrics") if isinstance(result, dict) else None
+    if not isinstance(lyrics, list) or not 0 <= line_index < len(lyrics):
+        raise HTTPException(status_code=404, detail="Unknown line.")
+
+    line = lyrics[line_index]
+    display = text.strip()
+    if display:
+        if "original_words" not in line:
+            line["original_words"] = line.get("words") or []
+        line["words"] = _retime_words(
+            line["original_words"], display, float(line["start time"]), float(line["end time"])
+        )
+        line["text"] = display
+    else:
+        if "original_words" in line:
+            line["words"] = line.pop("original_words")
+        line.pop("text", None)
+
+    _write_json(result_path, result)
+    _touch_session(sid)
+    public = {key: value for key, value in line.items() if key != "original_words"}
+    return {"take_id": tid, "line_index": line_index, "line": public}
 
 
 @app.post("/sessions/{session_id}/takes/{take_id}/process")
@@ -902,6 +1058,7 @@ def _line_data(ref: dict[str, Any]) -> dict[str, Any]:
     take_bpm = result.get("bpm") if isinstance(result, dict) else None
     return {
         "bpm": float(line.get("bpm") or 120.0),
+        "text": line.get("text"),
         "take_bpm": float(take_bpm) if take_bpm else None,
         "prev_bpm": float(previous.get("bpm") or 0.0) if previous else None,
         "next_bpm": float(following.get("bpm") or 0.0) if following else None,

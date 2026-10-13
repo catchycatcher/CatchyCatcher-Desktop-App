@@ -234,6 +234,8 @@ def build_timeline(
             "speed": round(speed, 3),
             "words": words,
         }
+        if entry.get("text"):
+            entry_line["text"] = entry["text"]
         source = entry.get("source")
         if isinstance(source, dict):
             entry_line["source"] = source
