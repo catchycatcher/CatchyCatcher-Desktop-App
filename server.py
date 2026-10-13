@@ -867,6 +867,23 @@ def _clean_bpm(bpm: Any, fallback: float = 120.0) -> float:
     return round(value, 1)
 
 
+def _median_line_bpm(lines: list[dict[str, Any]], fallback: float = 120.0) -> float:
+    """Median BPM of the lines' source takes, or ``fallback`` when unknown."""
+    bpms: list[float] = []
+    for ref in lines:
+        try:
+            bpms.append(float(_line_data(ref)["bpm"]))
+        except HTTPException:
+            continue
+    usable = sorted(value for value in bpms if value > 20)
+    if not usable:
+        return fallback
+    middle = len(usable) // 2
+    if len(usable) % 2:
+        return round(usable[middle], 1)
+    return round((usable[middle - 1] + usable[middle]) / 2, 1)
+
+
 def _scrapbook_signature(bpm: float, lines: list[dict[str, Any]]) -> str:
     payload = json.dumps({"bpm": bpm, "lines": lines}, sort_keys=True)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
@@ -884,6 +901,7 @@ def _scrapbook_summary(meta: dict[str, Any]) -> dict[str, Any]:
         "scrapbook_id": meta.get("scrapbook_id"),
         "name": meta.get("name"),
         "bpm": meta.get("bpm"),
+        "bpm_manual": bool(meta.get("bpm_manual", False)),
         "line_count": len(meta.get("lines") or []),
         "created_at": meta.get("created_at"),
         "updated_at": meta.get("updated_at"),
@@ -974,16 +992,21 @@ def list_scrapbooks() -> dict[str, Any]:
 
 @app.post("/scrapbooks")
 def create_scrapbook(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
-    """Create a scrapbook from ``{name, bpm, lines}``."""
+    """Create a scrapbook from ``{name, lines}``.
+
+    The BPM starts as the median of the lines' source takes (120 when empty) and
+    keeps tracking it until the client sets ``bpm`` explicitly.
+    """
     name = _clean_name(body.get("name"), "Scrapbook")
-    bpm = _clean_bpm(body.get("bpm"))
     lines = _normalize_lines(body.get("lines"))
+    bpm = _median_line_bpm(lines)
     scrapbook_id = f"sb-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
     now = _now()
     meta = {
         "scrapbook_id": scrapbook_id,
         "name": name,
         "bpm": bpm,
+        "bpm_manual": False,
         "lines": lines,
         "created_at": now,
         "updated_at": now,
@@ -1007,14 +1030,28 @@ def get_scrapbook(scrapbook_id: str) -> dict[str, Any]:
 def update_scrapbook(
     scrapbook_id: str, body: dict[str, Any] = Body(default={})
 ) -> dict[str, Any]:
-    """Update ``name``, ``bpm`` and/or ``lines``. Edits invalidate the render."""
+    """Update ``name``, ``bpm`` and/or ``lines``. Edits invalidate the render.
+
+    Setting ``bpm`` marks it manual (it then stops tracking the lines); pass
+    ``bpm_manual: false`` to hand it back to the automatic median.
+    """
     meta = _load_scrapbook(scrapbook_id)
+    manual = bool(meta.get("bpm_manual", False))
+    if "bpm_manual" in body:
+        manual = bool(body.get("bpm_manual"))
+
     if "name" in body:
         meta["name"] = _clean_name(body.get("name"), meta.get("name") or "Scrapbook")
-    if "bpm" in body:
-        meta["bpm"] = _clean_bpm(body.get("bpm"), meta.get("bpm") or 120.0)
     if "lines" in body:
         meta["lines"] = _normalize_lines(body.get("lines"))
+    if "bpm" in body:
+        meta["bpm"] = _clean_bpm(body.get("bpm"), meta.get("bpm") or 120.0)
+        manual = True
+
+    meta["bpm_manual"] = manual
+    if not manual:
+        meta["bpm"] = _median_line_bpm(meta.get("lines") or [], meta.get("bpm") or 120.0)
+
     meta["updated_at"] = _now()
     _write_json(_scrapbook_meta_path(scrapbook_id), meta)
     result = _scrapbook_summary(meta)

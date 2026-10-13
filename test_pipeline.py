@@ -1069,7 +1069,9 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(created.status_code, 200, created.text)
         sid = created.json()["scrapbook_id"]
         self.assertEqual(created.json()["line_count"], 1)
-        self.assertEqual(created.json()["bpm"], 108.0)
+        # No manual BPM: it follows the median of the line's source take (120).
+        self.assertEqual(created.json()["bpm"], 120.0)
+        self.assertFalse(created.json()["bpm_manual"])
 
         listed = self.client.get("/scrapbooks").json()["scrapbooks"]
         self.assertIn(sid, [item["scrapbook_id"] for item in listed])
@@ -1110,6 +1112,63 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(self.client.delete(f"/scrapbooks/{sid}").status_code, 200)
         self.assertEqual(self.client.get(f"/scrapbooks/{sid}").status_code, 404)
+
+    def test_median_line_bpm(self):
+        with mock.patch.object(
+            server, "_line_data", side_effect=[{"bpm": 90.0}, {"bpm": 130.0}, {"bpm": 100.0}]
+        ):
+            self.assertEqual(server._median_line_bpm([{}, {}, {}]), 100.0)
+        with mock.patch.object(server, "_line_data", return_value={"bpm": 5.0}):
+            self.assertEqual(server._median_line_bpm([{}], fallback=120.0), 120.0)
+        # Even counts average the two middle values.
+        with mock.patch.object(
+            server,
+            "_line_data",
+            side_effect=[{"bpm": 100.0}, {"bpm": 100.0}, {"bpm": 140.0}, {"bpm": 140.0}],
+        ):
+            self.assertEqual(server._median_line_bpm([{}, {}, {}, {}]), 120.0)
+
+    def test_scrapbook_bpm_tracks_lines_until_set_manually(self):
+        with mock.patch.object(server, "_line_data", return_value={"bpm": 90.0}):
+            created = self.client.post(
+                "/scrapbooks",
+                json={"name": "Mix", "lines": [{"session_id": "s", "take_id": "t", "line_index": 0}]},
+            )
+        sid = created.json()["scrapbook_id"]
+        self.assertEqual(created.json()["bpm"], 90.0)
+        self.assertFalse(created.json()["bpm_manual"])
+
+        # Adding more lines keeps the BPM glued to their median.
+        with mock.patch.object(server, "_line_data", return_value={"bpm": 90.0}):
+            updated = self.client.patch(
+                f"/scrapbooks/{sid}",
+                json={
+                    "lines": [
+                        {"session_id": "s", "take_id": "t", "line_index": 0},
+                        {"session_id": "s", "take_id": "t", "line_index": 1},
+                    ]
+                },
+            )
+        self.assertEqual(updated.json()["bpm"], 90.0)
+
+        # Setting it explicitly pins it, and later edits leave it alone.
+        pinned = self.client.patch(f"/scrapbooks/{sid}", json={"bpm": 140})
+        self.assertEqual(pinned.json()["bpm"], 140.0)
+        self.assertTrue(pinned.json()["bpm_manual"])
+
+        with mock.patch.object(server, "_line_data", return_value={"bpm": 90.0}):
+            again = self.client.patch(
+                f"/scrapbooks/{sid}",
+                json={"lines": [{"session_id": "s", "take_id": "t", "line_index": 0}]},
+            )
+        self.assertEqual(again.json()["bpm"], 140.0)
+        self.assertTrue(again.json()["bpm_manual"])
+
+        # Handing it back to automatic follows the lines again.
+        with mock.patch.object(server, "_line_data", return_value={"bpm": 90.0}):
+            auto = self.client.patch(f"/scrapbooks/{sid}", json={"bpm_manual": False})
+        self.assertEqual(auto.json()["bpm"], 90.0)
+        self.assertFalse(auto.json()["bpm_manual"])
 
 
 if __name__ == "__main__":

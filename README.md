@@ -296,9 +296,9 @@ be added, removed or reordered. Editing invalidates the cached render.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/scrapbooks` | List scrapbooks, most recently updated first. |
-| `POST` | `/scrapbooks` | Create from `{name, bpm, lines}` (`lines` are `{session_id, take_id, line_index}`). |
+| `POST` | `/scrapbooks` | Create from `{name, lines}` (`lines` are `{session_id, take_id, line_index}`). The BPM starts as the median of the lines' takes. |
 | `GET` | `/scrapbooks/{scrapbook_id}` | One scrapbook with its lines and last render. |
-| `PATCH` | `/scrapbooks/{scrapbook_id}` | Update `name`/`bpm`/`lines`. |
+| `PATCH` | `/scrapbooks/{scrapbook_id}` | Update `name`/`bpm`/`lines`. Setting `bpm` pins it; `bpm_manual: false` hands it back to the automatic median. |
 | `DELETE` | `/scrapbooks/{scrapbook_id}` | Delete a scrapbook and its mix. |
 | `POST` | `/scrapbooks/{scrapbook_id}/render` | Render (or return the cached) mix + word timeline. |
 | `GET` | `/scrapbooks/{scrapbook_id}/audio` | Stream the rendered mix (`audio/mp4`). |
