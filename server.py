@@ -1326,6 +1326,7 @@ def _normalize_group(entry: Any) -> dict[str, Any] | None:
     if not group_id:
         return None
     name = str(group.get("name", "")).strip()
+    instance = str(group.get("instance", "")).strip()[:64]
     inner: list[dict[str, Any]] = []
     for line in entry.get("lines") or []:
         normalized = _normalize_line_ref(line)
@@ -1338,6 +1339,9 @@ def _normalize_group(entry: Any) -> dict[str, Any] | None:
             "id": group_id,
             "type": str(group["type"]),
             "name": _clean_name(name or str(group["type"]).capitalize(), str(group["type"])),
+            # A unique per-entry instance id, so two copies of a section stay
+            # separate even when they sit next to each other.
+            "instance": instance or f"{group_id}-{os.urandom(3).hex()}",
         },
         "lines": inner,
     }

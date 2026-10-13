@@ -1334,7 +1334,11 @@ class ApiTests(unittest.TestCase):
                 "name": "G",
                 "lines": [
                     {
-                        "group": {"id": "g1", "type": "chorus", "name": "Chorus 1"},
+                        "group": {"id": "g1", "type": "chorus", "name": "Chorus 1", "instance": "inst1"},
+                        "lines": [{"session_id": "grp", "take_id": "t", "line_index": 0}],
+                    },
+                    {
+                        "group": {"id": "g1", "type": "chorus", "name": "Chorus 1", "instance": "inst2"},
                         "lines": [{"session_id": "grp", "take_id": "t", "line_index": 0}],
                     },
                     {"session_id": "grp", "take_id": "t", "line_index": 0},
@@ -1348,14 +1352,17 @@ class ApiTests(unittest.TestCase):
 
         body = self.client.get(f"/sessions/grp/scrapbooks/{sid}").json()
         lines = body["lines"]
-        # The invalid group type is dropped, leaving the chorus and the bare line.
-        self.assertEqual(len(lines), 2)
+        # The invalid group type is dropped: two chorus copies plus a bare line.
+        self.assertEqual(len(lines), 3)
         self.assertEqual(lines[0]["group"]["type"], "chorus")
         self.assertEqual(lines[0]["group"]["name"], "Chorus 1")
+        self.assertEqual(lines[0]["group"]["instance"], "inst1")
+        self.assertEqual(lines[1]["group"]["instance"], "inst2")
+        self.assertNotEqual(lines[0]["group"]["instance"], lines[1]["group"]["instance"])
         self.assertEqual(lines[0]["lines"][0]["line_index"], 0)
-        self.assertNotIn("group", lines[1])
+        self.assertNotIn("group", lines[2])
         # line_count counts the flattened lines.
-        self.assertEqual(body["line_count"], 2)
+        self.assertEqual(body["line_count"], 3)
 
     def test_scrapbook_signature_ignores_groups(self):
         bare = [{"session_id": "s", "take_id": "t", "line_index": 0, "data": {}}]
