@@ -50,6 +50,33 @@ Endpoints
     Single-shot convenience endpoint from the original spec. Equivalent to
     creating a session named after the file with one take called ``take``.
 
+Scribbles
+---------
+Scribbles are a journal shared across every session. They are stored as takes in
+a reserved ``scribbles`` session (hidden from ``/sessions``), and these routes
+mirror the take routes.
+
+``GET    /scribbles``
+    List scribbles (``{scribble_id, name, status, ...}``), newest first.
+``POST   /scribbles/{scribble_id}``
+    Upload a scribble; processed by default (``process=false`` just stores it).
+``POST   /scribbles/{scribble_id}/process``
+    Process a previously stored scribble.
+``GET    /scribbles/{scribble_id}``
+    One scribble's metadata plus its result, when finished.
+``PATCH  /scribbles/{scribble_id}``
+    Rename a scribble and/or toggle its bookmark.
+``PATCH  /scribbles/{scribble_id}/lines/{line_index}``
+    Set (or clear) one line's display ``text`` override.
+``PUT    /scribbles/{scribble_id}/lyrics``
+    Replace a scribble's lines (re-splitting) and recompute their BPM.
+``GET    /scribbles/{scribble_id}/audio/{stem}``
+    Stream a generated stem (``vocals`` or ``background``).
+``GET    /scribbles/{scribble_id}/original``
+    Stream the raw recording.
+``DELETE /scribbles/{scribble_id}``
+    Remove a scribble and its files.
+
 Scrapbooks
 ----------
 ``GET    /scrapbooks``
@@ -115,6 +142,11 @@ SCRAPBOOKS_DIR = Path(
     os.environ.get("CATCHYCATCHER_SCRAPBOOK_DIR", BASE_DIR / "scrapbooks")
 ).resolve()
 SCRAPBOOKS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Scribbles are a journal shared across every session. They live in a reserved
+# session folder so takes, stems, lyric edits and scrapbook line references all
+# reuse the exact same storage and code paths. It is hidden from ``/sessions``.
+SCRIBBLES_SESSION_ID = "scribbles"
 
 _raw_origins = os.environ.get("CATCHYCATCHER_CORS_ORIGINS", "*").strip()
 if _raw_origins in ("", "*"):
@@ -545,6 +577,16 @@ def root() -> dict[str, Any]:
             "GET /sessions/{session_id}/takes/{take_id}/original",
             "DELETE /sessions/{session_id}/takes/{take_id}",
             "POST /process-session",
+            "GET /scribbles",
+            "POST /scribbles/{scribble_id}",
+            "POST /scribbles/{scribble_id}/process",
+            "GET /scribbles/{scribble_id}",
+            "PATCH /scribbles/{scribble_id}",
+            "PATCH /scribbles/{scribble_id}/lines/{line_index}",
+            "PUT /scribbles/{scribble_id}/lyrics",
+            "GET /scribbles/{scribble_id}/audio/{stem}",
+            "GET /scribbles/{scribble_id}/original",
+            "DELETE /scribbles/{scribble_id}",
             "GET /scrapbooks",
             "POST /scrapbooks",
             "GET /scrapbooks/{scrapbook_id}",
@@ -882,7 +924,7 @@ def list_sessions() -> dict[str, Any]:
     sessions: list[dict[str, str]] = []
     if SESSIONS_DIR.is_dir():
         for path in SESSIONS_DIR.iterdir():
-            if path.is_dir():
+            if path.is_dir() and path.name != SCRIBBLES_SESSION_ID:
                 sessions.append(
                     {
                         "id": path.name,
@@ -1046,6 +1088,113 @@ def process_session_endpoint(
         None,
         silence_threshold,
     )
+
+
+# ---------------------------------------------------------------------------
+# Scribbles (a journal shared across every session)
+# ---------------------------------------------------------------------------
+#
+# A scribble is exactly a take, but stored in the reserved ``scribbles`` session
+# instead of a song session. That means stems, lyric edits and scrapbook line
+# references all work with no special cases; these routes are thin, explicit
+# aliases so the client (and the docs) never have to know the reserved id.
+
+
+def _scribble_metas() -> list[dict[str, Any]]:
+    takes_dir = _session_dir(SCRIBBLES_SESSION_ID) / "takes"
+    scribbles: list[dict[str, Any]] = []
+    if takes_dir.is_dir():
+        for take in takes_dir.iterdir():
+            meta = _read_json(take / "meta.json") if take.is_dir() else None
+            if isinstance(meta, dict):
+                scribbles.append(meta)
+    scribbles.sort(
+        key=lambda meta: (meta.get("created_at") or "", int(meta.get("index") or 0)),
+        reverse=True,
+    )
+    return scribbles
+
+
+@app.get("/scribbles")
+def list_scribbles() -> dict[str, Any]:
+    """List every scribble, newest first. Always ``200``, even when empty."""
+    return {"scribbles": _scribble_metas()}
+
+
+@app.post("/scribbles/{scribble_id}")
+def create_scribble(
+    scribble_id: str,
+    file: UploadFile = File(..., description="The recorded scribble."),
+    index: int | None = Query(default=None, ge=1),
+    name: str | None = Query(default=None),
+    process: bool = Query(default=True),
+    silence_threshold: float = Query(default=pipeline.SILENCE_THRESHOLD, gt=0, le=5),
+) -> JSONResponse:
+    """Store a scribble, processing it now unless ``process=false``."""
+    return create_take(
+        SCRIBBLES_SESSION_ID, scribble_id, file, index, name, process, silence_threshold
+    )
+
+
+@app.post("/scribbles/{scribble_id}/process")
+def process_scribble(
+    scribble_id: str,
+    silence_threshold: float = Query(default=pipeline.SILENCE_THRESHOLD, gt=0, le=5),
+) -> JSONResponse:
+    """Process a previously stored scribble and return its result."""
+    return process_take(SCRIBBLES_SESSION_ID, scribble_id, silence_threshold)
+
+
+@app.get("/scribbles/{scribble_id}")
+def get_scribble(scribble_id: str) -> dict[str, Any]:
+    """Return one scribble's metadata plus its result, when available."""
+    return get_take(SCRIBBLES_SESSION_ID, scribble_id)
+
+
+@app.patch("/scribbles/{scribble_id}")
+def update_scribble(
+    scribble_id: str,
+    name: str | None = Query(default=None, min_length=1),
+    bookmarked: bool | None = Query(default=None),
+) -> dict[str, Any]:
+    """Rename a scribble and/or toggle its bookmark; audio is untouched."""
+    return update_take(SCRIBBLES_SESSION_ID, scribble_id, name, bookmarked)
+
+
+@app.patch("/scribbles/{scribble_id}/lines/{line_index}")
+def update_scribble_line(
+    scribble_id: str,
+    line_index: int,
+    text: str = Query(default="", max_length=2000),
+) -> dict[str, Any]:
+    """Rewrite one scribble line's words from edited text."""
+    return update_line_text(SCRIBBLES_SESSION_ID, scribble_id, line_index, text)
+
+
+@app.put("/scribbles/{scribble_id}/lyrics")
+def replace_scribble_lyrics(
+    scribble_id: str, body: dict[str, Any] = Body(default={})
+) -> dict[str, Any]:
+    """Replace a scribble's lyric lines and recompute their BPM."""
+    return replace_lyrics(SCRIBBLES_SESSION_ID, scribble_id, body)
+
+
+@app.get("/scribbles/{scribble_id}/audio/{stem}")
+def get_scribble_audio(scribble_id: str, stem: str) -> FileResponse:
+    """Stream a scribble's generated stem (``vocals`` or ``background``)."""
+    return get_take_audio(SCRIBBLES_SESSION_ID, scribble_id, stem)
+
+
+@app.get("/scribbles/{scribble_id}/original")
+def get_scribble_original(scribble_id: str) -> FileResponse:
+    """Stream a scribble's raw recording."""
+    return get_take_original(SCRIBBLES_SESSION_ID, scribble_id)
+
+
+@app.delete("/scribbles/{scribble_id}")
+def delete_scribble(scribble_id: str) -> dict[str, Any]:
+    """Delete a scribble and all of its files."""
+    return delete_take(SCRIBBLES_SESSION_ID, scribble_id)
 
 
 # ---------------------------------------------------------------------------

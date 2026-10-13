@@ -1324,6 +1324,114 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.get(f"/scrapbooks/{sid}").status_code, 404)
 
 
+class ScribbleApiTests(unittest.TestCase):
+    """Scribbles: a journal shared across every session, stored in ``scribbles``."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp(prefix="catchy_scribbles_")
+        self.scrapbook_dir = tempfile.mkdtemp(prefix="catchy_scribbles_sb_")
+        self._orig_sessions = server.SESSIONS_DIR
+        self._orig_scrapbooks = server.SCRAPBOOKS_DIR
+        server.SESSIONS_DIR = Path(self.temp_dir)
+        server.SCRAPBOOKS_DIR = Path(self.scrapbook_dir)
+        self.client = TestClient(server.app)
+
+    def tearDown(self):
+        server.SESSIONS_DIR = self._orig_sessions
+        server.SCRAPBOOKS_DIR = self._orig_scrapbooks
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        shutil.rmtree(self.scrapbook_dir, ignore_errors=True)
+
+    @staticmethod
+    def _fake_process(holder):
+        def fake(input_path, output_dir="./output", *, silence_threshold=0.4):
+            Path(output_dir, "vocals.m4a").write_bytes(b"VOCALS")
+            Path(output_dir, "background.m4a").write_bytes(b"BACKGROUND")
+            result = {
+                "vocals": str(Path(output_dir, "vocals.m4a")),
+                "background": str(Path(output_dir, "background.m4a")),
+                "lyrics": [
+                    {
+                        "bpm": 120.0,
+                        "start time": 0.0,
+                        "end time": 0.5,
+                        "words": [{"word": "hi", "length": 0.5}],
+                    }
+                ],
+            }
+            holder.append(result)
+            return result
+
+        return fake
+
+    def test_scribbles_are_global_and_hidden_from_sessions(self):
+        # The list is always 200, even before anything exists.
+        self.assertEqual(self.client.get("/scribbles").json(), {"scribbles": []})
+
+        self.client.post("/sessions/song", params={"name": "Song"})
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            created = self.client.post(
+                "/scribbles/idea1",
+                params={"index": 1, "name": "Idea One"},
+                files={"file": ("idea1.m4a", b"audio-bytes", "audio/mp4")},
+            )
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertEqual(created.json()["lyrics"][0]["words"], [{"word": "hi", "length": 0.5}])
+
+        # The song session is listed; the reserved scribbles store never is.
+        sessions = [item["id"] for item in self.client.get("/sessions").json()["sessions"]]
+        self.assertEqual(sessions, ["song"])
+
+        listed = self.client.get("/scribbles").json()["scribbles"]
+        self.assertEqual([item["take_id"] for item in listed], ["idea1"])
+        self.assertEqual(listed[0]["name"], "Idea One")
+
+    def test_scribble_lifecycle(self):
+        stored = self.client.post(
+            "/scribbles/raw1",
+            params={"process": "false", "name": "Scratch"},
+            files={"file": ("raw1.webm", b"raw-audio", "audio/webm")},
+        )
+        self.assertEqual(stored.status_code, 200, stored.text)
+        self.assertEqual(stored.json()["status"], "recorded")
+
+        original = self.client.get("/scribbles/raw1/original")
+        self.assertEqual(original.status_code, 200)
+        self.assertEqual(original.content, b"raw-audio")
+
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            processed = self.client.post("/scribbles/raw1/process")
+        self.assertEqual(processed.status_code, 200, processed.text)
+        self.assertEqual(self.client.get("/scribbles/raw1").json()["meta"]["status"], "done")
+
+        renamed = self.client.patch("/scribbles/raw1", params={"name": "Renamed"})
+        self.assertEqual(renamed.json()["name"], "Renamed")
+
+        self.assertEqual(self.client.delete("/scribbles/raw1").status_code, 200)
+        self.assertEqual(self.client.get("/scribbles/raw1").status_code, 404)
+
+    def test_scribble_lines_can_feed_a_scrapbook(self):
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            self.client.post(
+                "/scribbles/idea", files={"file": ("idea.m4a", b"x", "audio/mp4")}
+            )
+        sid = self.client.post("/scrapbooks", json={"name": "Book", "lines": []}).json()[
+            "scrapbook_id"
+        ]
+        updated = self.client.patch(
+            f"/scrapbooks/{sid}",
+            json={"lines": [{"session_id": "scribbles", "take_id": "idea", "line_index": 0}]},
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["line_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 
