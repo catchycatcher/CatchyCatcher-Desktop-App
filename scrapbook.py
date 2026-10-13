@@ -1,19 +1,25 @@
 """Scrapbook rendering: stitch isolated vocal lines into one tempo-matched mix.
 
-A scrapbook is an ordered list of *lines* referenced from processed takes. Every
-line is time-stretched to the scrapbook's single BPM with FFmpeg's pitch-
-preserving ``atempo`` filter, the gaps between lines are rebuilt from the pauses
-that surrounded each line in its own journal (scaled by the tempo change) and
-blended, and the whole thing is concatenated into one audio file the client can
-play with word highlighting.
+A scrapbook is an ordered list of *lines* referenced from processed takes. There
+is no single BPM: each line keeps its own recorded tempo, and only the *relative*
+tempo between neighbouring lines is adjusted.
+
+For each line we know two expected ratios from its own journal — how its tempo
+related to the line that followed it (``after``) and to the line that preceded it
+(``before``). When line B is placed after line A, the ratio used for B is
+whichever of A's ``after`` / B's ``before`` needs the smallest change from B
+playing at its own recorded tempo (relative to A's already-adjusted tempo). Once
+every line has a speed, they are normalised so the median log-speed is zero — so
+half the lines speed up and half slow down, with no overall shift.
 
 The module is deliberately free of FastAPI/state: callers pass in the resolved
-line data and the output directory, which keeps the timeline maths unit-testable
-without a GPU or a real recording.
+line data and the output directory, which keeps the maths unit-testable without
+a GPU or a real recording.
 """
 
 from __future__ import annotations
 
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -28,6 +34,9 @@ MAX_GAP_SECONDS = 3.0
 #: FFmpeg's ``atempo`` accepts roughly 0.5-2.0 per instance; chain for extremes.
 ATEMPO_MIN = 0.5
 ATEMPO_MAX = 2.0
+#: How far a line may be sped up/slowed down from its recorded tempo.
+MIN_SPEED = 0.5
+MAX_SPEED = 2.0
 
 
 def atempo_factors(rate: float) -> list[float]:
@@ -51,6 +60,16 @@ def atempo_filter(rate: float) -> str:
     return ",".join(f"atempo={factor}" for factor in atempo_factors(rate))
 
 
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
 def _source_words(entry: dict[str, Any], line_start: float) -> list[tuple[str, float, float]]:
     """Each word's ``(text, start, end)`` in the source timeline."""
     resolved: list[tuple[str, float, float]] = []
@@ -65,48 +84,93 @@ def _source_words(entry: dict[str, Any], line_start: float) -> list[tuple[str, f
     return resolved
 
 
-def _gap_between(current: dict[str, Any], following: dict[str, Any], target: float) -> float:
-    """Blend the pauses around two adjacent lines, scaled by the tempo change.
+def _line_speeds(entries: list[dict[str, Any]]) -> list[float]:
+    """Per-line playback speed factors (1.0 = played at its recorded tempo).
 
-    The pause after ``current`` (in its own take) is scaled by *its* tempo
-    change and the pause before ``following`` by *its* tempo change, then the two
-    are averaged, so a gap that came from a slow line is not carried over as-is
-    into a fast scrapbook (and vice versa).
+    ``speed > 1`` plays the line faster (shorter); the median log-speed is
+    normalised to zero so there is no overall tempo shift.
     """
-    current_scale = float(current.get("bpm") or target) / target
-    following_scale = float(following.get("bpm") or target) / target
+    speeds: list[float] = []
+    played: float | None = None
 
+    for index, entry in enumerate(entries):
+        bpm = float(entry.get("bpm") or 120.0)
+        if played is None:
+            speeds.append(1.0)
+            played = bpm
+            continue
+
+        natural = bpm / played  # ratio that leaves B unstretched
+        candidates: list[float] = []
+        after = entries[index - 1].get("after")
+        before = entry.get("before")
+        if after:
+            candidates.append(float(after))
+        if before:
+            candidates.append(float(before))
+
+        if candidates:
+            chosen = min(candidates, key=lambda ratio: abs(math.log(ratio) - math.log(natural)))
+        else:
+            chosen = natural
+
+        played = played * chosen
+        speeds.append(played / bpm)
+
+    if speeds:
+        logs = [math.log(speed) for speed in speeds]
+        shift = _median(logs)
+        speeds = [math.exp(value - shift) for value in logs]
+
+    return [max(MIN_SPEED, min(MAX_SPEED, speed)) for speed in speeds]
+
+
+def _gap_between(
+    current: dict[str, Any], following: dict[str, Any], current_speed: float, next_speed: float
+) -> float:
+    """Blend the pauses around two adjacent lines, scaled by their new speeds."""
     gaps: list[float] = []
     if current.get("gap_after") is not None:
-        gaps.append(float(current["gap_after"]) * current_scale)
+        gaps.append(float(current["gap_after"]) / current_speed)
     if following.get("gap_before") is not None:
-        gaps.append(float(following["gap_before"]) * following_scale)
+        gaps.append(float(following["gap_before"]) / next_speed)
 
-    gap = sum(gaps) / len(gaps) if gaps else DEFAULT_GAP_SECONDS * current_scale
+    gap = sum(gaps) / len(gaps) if gaps else DEFAULT_GAP_SECONDS / current_speed
     return max(MIN_GAP_SECONDS, min(MAX_GAP_SECONDS, gap))
 
 
+def _with_ratios(entries: list[dict[str, Any]]) -> None:
+    """Fill in each entry's ``before``/``after`` tempo ratios (in place)."""
+    for entry in entries:
+        bpm = float(entry.get("bpm") or 120.0)
+        next_bpm = entry.get("next_bpm")
+        prev_bpm = entry.get("prev_bpm")
+        entry["after"] = (float(next_bpm) / bpm) if next_bpm else None
+        entry["before"] = (bpm / float(prev_bpm)) if prev_bpm else None
+
+
 def build_timeline(
-    entries: list[dict[str, Any]], target_bpm: float
+    entries: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[float]]:
-    """Lay every line out on the mix timeline.
+    """Lay every line out on the mix timeline at its chosen speed.
 
     Returns ``(timeline, gaps)`` where ``timeline`` is a list of schema-compatible
-    lyric lines (``start time``/``end time``/``words`` with ``start``/``end``)
-    placed at their position in the mix, and ``gaps`` holds the silence inserted
-    between each consecutive pair.
+    lyric lines (``start time``/``end time``/``words``) with a ``speed``, and
+    ``gaps`` holds the silence inserted between each consecutive pair.
     """
-    target = float(target_bpm) if target_bpm and target_bpm > 0 else 120.0
+    _with_ratios(entries)
+    speeds = _line_speeds(entries)
+
     timeline: list[dict[str, Any]] = []
     gaps: list[float] = []
     cursor = 0.0
 
     for index, entry in enumerate(entries):
-        source_bpm = float(entry.get("bpm") or target)
-        scale = source_bpm / target  # duration multiplier; atempo = 1 / scale
+        speed = speeds[index]
+        source_bpm = float(entry.get("bpm") or 120.0)
         line_start = float(entry["start"])
         line_end = float(entry["end"])
-        duration = max(0.0, (line_end - line_start) * scale)
+        duration = max(0.0, (line_end - line_start) / speed)
 
         mix_start = cursor
         mix_end = cursor + duration
@@ -114,18 +178,18 @@ def build_timeline(
         words = [
             {
                 "word": text,
-                "start": round(mix_start + (word_start - line_start) * scale, 3),
-                "end": round(mix_start + (word_end - line_start) * scale, 3),
-                "length": round((word_end - word_start) * scale, 3),
+                "start": round(mix_start + (word_start - line_start) / speed, 3),
+                "end": round(mix_start + (word_end - line_start) / speed, 3),
+                "length": round((word_end - word_start) / speed, 3),
             }
             for text, word_start, word_end in _source_words(entry, line_start)
         ]
 
         entry_line: dict[str, Any] = {
-            "bpm": round(target, 1),
+            "bpm": round(source_bpm * speed, 1),
             "start time": round(mix_start, 3),
             "end time": round(mix_end, 3),
-            "source_bpm": round(source_bpm, 1),
+            "speed": round(speed, 3),
             "words": words,
         }
         source = entry.get("source")
@@ -135,7 +199,7 @@ def build_timeline(
         cursor = mix_end
 
         if index < len(entries) - 1:
-            gap = _gap_between(entry, entries[index + 1], target)
+            gap = _gap_between(entry, entries[index + 1], speed, speeds[index + 1])
             gaps.append(round(gap, 3))
             cursor += gap
 
@@ -206,7 +270,7 @@ def _run(command: list[str]) -> None:
 
 
 def render(
-    entries: list[dict[str, Any]], target_bpm: float, output_dir: str | Path
+    entries: list[dict[str, Any]], output_dir: str | Path
 ) -> tuple[list[dict[str, Any]], list[float], Path]:
     """Render the whole scrapbook into ``<output_dir>/mix.m4a``.
 
@@ -216,8 +280,9 @@ def render(
     if not entries:
         raise ValueError("Cannot render a scrapbook with no lines.")
 
-    target = float(target_bpm) if target_bpm and target_bpm > 0 else 120.0
-    timeline, gaps = build_timeline(entries, target)
+    _with_ratios(entries)
+    speeds = _line_speeds(entries)
+    timeline, gaps = build_timeline(entries)
 
     out_dir = Path(output_dir)
     work = out_dir / "render"
@@ -227,11 +292,10 @@ def render(
 
     parts: list[Path] = []
     for index, entry in enumerate(entries):
-        source_bpm = float(entry.get("bpm") or target)
-        rate = target / source_bpm if source_bpm > 0 else 1.0
+        speed = speeds[index]
         duration = max(0.0, float(entry["end"]) - float(entry["start"]))
         line_path = work / f"line_{index:04d}.wav"
-        _run(extract_command(entry["vocals"], float(entry["start"]), duration, rate, line_path))
+        _run(extract_command(entry["vocals"], float(entry["start"]), duration, speed, line_path))
         parts.append(line_path)
 
         if index < len(gaps) and gaps[index] > 0.001:

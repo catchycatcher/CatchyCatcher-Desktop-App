@@ -11,6 +11,7 @@ the returned schema and stem wiring are verified without a GPU.
 """
 
 import json
+import math
 import os
 import shutil
 import statistics
@@ -656,7 +657,7 @@ class ProcessSongSessionFlowTests(unittest.TestCase):
 
 
 class ScrapbookTimelineTests(unittest.TestCase):
-    """The pure tempo/gap maths behind a rendered scrapbook mix."""
+    """The pure per-line tempo/gap maths behind a rendered scrapbook mix."""
 
     def test_atempo_is_split_into_supported_factors(self):
         self.assertEqual(scrapbook.atempo_factors(1.0), [1.0])
@@ -667,78 +668,70 @@ class ScrapbookTimelineTests(unittest.TestCase):
             product *= factor
         self.assertAlmostEqual(product, 1.7, places=5)
 
-    def test_timeline_stretches_lines_and_blends_gaps(self):
+    def test_matching_journals_need_no_stretch(self):
         entries = [
-            {
-                "bpm": 100.0,
-                "start": 0.0,
-                "end": 2.0,
-                "gap_after": 0.5,
-                "words": [
-                    {"word": "a", "start": 0.0, "end": 1.0, "length": 1.0},
-                    {"word": "b", "start": 1.0, "end": 2.0, "length": 1.0},
-                ],
-            },
-            {
-                "bpm": 120.0,
-                "start": 10.0,
-                "end": 12.0,
-                "gap_before": 0.3,
-                "words": [{"word": "c", "start": 10.0, "end": 11.0, "length": 1.0}],
-            },
+            {"bpm": 100.0, "start": 0.0, "end": 1.0, "words": [], "next_bpm": 120.0},
+            {"bpm": 120.0, "start": 0.0, "end": 1.0, "words": [], "prev_bpm": 100.0},
         ]
-        timeline, gaps = scrapbook.build_timeline(entries, 100.0)
+        timeline, gaps = scrapbook.build_timeline(entries)
+        # A's after-ratio and B's before-ratio both say 1.2, matching B's
+        # natural ratio, so neither line is stretched.
+        self.assertAlmostEqual(timeline[0]["speed"], 1.0, places=3)
+        self.assertAlmostEqual(timeline[1]["speed"], 1.0, places=3)
+        self.assertAlmostEqual(timeline[0]["end time"], 1.0, places=3)
+        self.assertAlmostEqual(gaps[0], scrapbook.DEFAULT_GAP_SECONDS, places=3)
+        self.assertAlmostEqual(timeline[1]["start time"], 1.0 + gaps[0], places=3)
 
-        # First line is already at the target tempo.
-        self.assertAlmostEqual(timeline[0]["start time"], 0.0, places=3)
-        self.assertAlmostEqual(timeline[0]["end time"], 2.0, places=3)
-
-        # Gap = mean(0.5 * 100/100, 0.3 * 120/100) = mean(0.5, 0.36) = 0.43.
-        self.assertEqual(len(gaps), 1)
-        self.assertAlmostEqual(gaps[0], 0.43, places=3)
-
-        # Second line sped up to the target: 2s at 120bpm -> 2.4s of audio.
-        self.assertAlmostEqual(timeline[1]["start time"], 2.43, places=3)
-        self.assertAlmostEqual(timeline[1]["end time"], 4.83, places=3)
-        self.assertAlmostEqual(timeline[1]["words"][0]["end"], 3.63, places=3)
-
-    def test_single_line_has_no_gaps(self):
+    def test_chooses_the_ratio_closest_to_natural(self):
         entries = [
-            {"bpm": 90.0, "start": 1.0, "end": 2.0, "words": [], "gap_after": 0.9, "gap_before": 0.4}
+            {"bpm": 100.0, "start": 0.0, "end": 1.0, "words": [], "next_bpm": 150.0},
+            {"bpm": 120.0, "start": 0.0, "end": 1.0, "words": [], "prev_bpm": 110.0},
         ]
-        timeline, gaps = scrapbook.build_timeline(entries, 120.0)
+        # natural = 120/100 = 1.2; candidates are A.after=1.5 and B.before=1.0909.
+        # 1.0909 is closer to 1.2, so B slows slightly: raw speed 0.909.
+        timeline, _gaps = scrapbook.build_timeline(entries)
+        # Median log-speed is normalised to zero, so the two speeds mirror.
+        self.assertAlmostEqual(timeline[0]["speed"], 1.049, places=2)
+        self.assertAlmostEqual(timeline[1]["speed"], 0.953, places=2)
+
+    def test_median_log_speed_is_zero(self):
+        entries = [
+            {"bpm": 100.0, "start": 0.0, "end": 1.0, "words": [], "next_bpm": 130.0},
+            {"bpm": 130.0, "start": 0.0, "end": 1.0, "words": [], "prev_bpm": 100.0, "next_bpm": 80.0},
+            {"bpm": 80.0, "start": 0.0, "end": 1.0, "words": [], "prev_bpm": 130.0},
+        ]
+        timeline, _gaps = scrapbook.build_timeline(entries)
+        logs = sorted(math.log(line["speed"]) for line in timeline)
+        self.assertAlmostEqual(logs[len(logs) // 2], 0.0, places=3)
+
+    def test_single_line_plays_at_its_tempo(self):
+        entries = [{"bpm": 90.0, "start": 1.0, "end": 2.0, "words": []}]
+        timeline, gaps = scrapbook.build_timeline(entries)
         self.assertEqual(gaps, [])
+        self.assertAlmostEqual(timeline[0]["speed"], 1.0, places=3)
         self.assertAlmostEqual(timeline[0]["start time"], 0.0, places=3)
-        self.assertAlmostEqual(timeline[0]["end time"], 0.75, places=3)
+        self.assertAlmostEqual(timeline[0]["end time"], 1.0, places=3)
 
     def test_timeline_tags_each_line_with_its_source(self):
         entries = [
-            {
-                "bpm": 100.0,
-                "start": 0.0,
-                "end": 1.0,
-                "words": [],
-                "source": {"session_id": "s", "take_id": "t", "line_index": 0},
-            },
-            {
-                "bpm": 100.0,
-                "start": 2.0,
-                "end": 3.0,
-                "words": [],
-                "source": {"session_id": "s", "take_id": "t", "line_index": 1},
-            },
+            {"bpm": 100.0, "start": 0.0, "end": 1.0, "words": [], "source": {"session_id": "s", "take_id": "t", "line_index": 0}},
+            {"bpm": 100.0, "start": 2.0, "end": 3.0, "words": [], "source": {"session_id": "s", "take_id": "t", "line_index": 1}},
         ]
-        timeline, _gaps = scrapbook.build_timeline(entries, 100.0)
+        timeline, _gaps = scrapbook.build_timeline(entries)
         self.assertEqual(timeline[0]["source"]["line_index"], 0)
         self.assertEqual(timeline[1]["source"]["line_index"], 1)
 
-    def test_fallback_gap_when_no_source_pause_is_known(self):
+    def test_gap_scales_with_the_new_speed(self):
         entries = [
-            {"bpm": 120.0, "start": 0.0, "end": 1.0, "words": []},
-            {"bpm": 120.0, "start": 5.0, "end": 6.0, "words": []},
+            {"bpm": 100.0, "start": 0.0, "end": 1.0, "words": [], "gap_after": 0.5, "next_bpm": 200.0},
+            {"bpm": 200.0, "start": 0.0, "end": 1.0, "words": [], "gap_before": 0.5, "prev_bpm": 100.0},
         ]
-        _timeline, gaps = scrapbook.build_timeline(entries, 120.0)
-        self.assertAlmostEqual(gaps[0], scrapbook.DEFAULT_GAP_SECONDS, places=3)
+        timeline, gaps = scrapbook.build_timeline(entries)
+        # B is nudged faster, so the blended gap shrinks (each half divided by
+        # that line's speed); it must stay positive and below the raw 0.5s.
+        self.assertGreater(gaps[0], 0.0)
+        self.assertLessEqual(gaps[0], 0.5)
+        self.assertAlmostEqual(timeline[1]["start time"], timeline[0]["end time"] + gaps[0], places=3)
 
     def test_extract_command_applies_tempo(self):
         command = scrapbook.extract_command("vocals.m4a", 1.5, 2.0, 1.5, Path("/tmp/out.wav"))
@@ -1102,7 +1095,6 @@ class ApiTests(unittest.TestCase):
             "/scrapbooks",
             json={
                 "name": "My Mix",
-                "bpm": 108,
                 "lines": [
                     {"session_id": "src", "take_id": "t1", "line_index": 0},
                     {"session_id": "src", "take_id": "t1", "line_index": 99},  # bad, dropped
@@ -1113,19 +1105,16 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(created.status_code, 200, created.text)
         sid = created.json()["scrapbook_id"]
         self.assertEqual(created.json()["line_count"], 1)
-        # No manual BPM: it follows the median of the line's source take (120).
-        self.assertEqual(created.json()["bpm"], 120.0)
-        self.assertFalse(created.json()["bpm_manual"])
 
         listed = self.client.get("/scrapbooks").json()["scrapbooks"]
         self.assertIn(sid, [item["scrapbook_id"] for item in listed])
 
-        def fake_render(entries, target_bpm, output_dir):
+        def fake_render(entries, output_dir):
             path = Path(output_dir)
             path.mkdir(parents=True, exist_ok=True)
             mix = path / "mix.m4a"
             mix.write_bytes(b"MIX")
-            timeline = [{"bpm": target_bpm, "start time": 0.0, "end time": 1.0, "words": []}]
+            timeline = [{"bpm": 120.0, "start time": 0.0, "end time": 1.0, "words": []}]
             return timeline, [], mix
 
         with mock.patch.object(server.scrapbook, "render", side_effect=fake_render) as render:
@@ -1145,9 +1134,8 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(audio.status_code, 200)
         self.assertEqual(audio.content, b"MIX")
 
-        updated = self.client.patch(f"/scrapbooks/{sid}", json={"bpm": 90, "lines": []})
+        updated = self.client.patch(f"/scrapbooks/{sid}", json={"lines": []})
         self.assertEqual(updated.status_code, 200, updated.text)
-        self.assertEqual(updated.json()["bpm"], 90.0)
         self.assertEqual(updated.json()["line_count"], 0)
 
         # Empty scrapbooks cannot render.
@@ -1156,63 +1144,6 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(self.client.delete(f"/scrapbooks/{sid}").status_code, 200)
         self.assertEqual(self.client.get(f"/scrapbooks/{sid}").status_code, 404)
-
-    def test_median_line_bpm(self):
-        with mock.patch.object(
-            server, "_line_data", side_effect=[{"bpm": 90.0}, {"bpm": 130.0}, {"bpm": 100.0}]
-        ):
-            self.assertEqual(server._median_line_bpm([{}, {}, {}]), 100.0)
-        with mock.patch.object(server, "_line_data", return_value={"bpm": 5.0}):
-            self.assertEqual(server._median_line_bpm([{}], fallback=120.0), 120.0)
-        # Even counts average the two middle values.
-        with mock.patch.object(
-            server,
-            "_line_data",
-            side_effect=[{"bpm": 100.0}, {"bpm": 100.0}, {"bpm": 140.0}, {"bpm": 140.0}],
-        ):
-            self.assertEqual(server._median_line_bpm([{}, {}, {}, {}]), 120.0)
-
-    def test_scrapbook_bpm_tracks_lines_until_set_manually(self):
-        with mock.patch.object(server, "_line_data", return_value={"bpm": 90.0}):
-            created = self.client.post(
-                "/scrapbooks",
-                json={"name": "Mix", "lines": [{"session_id": "s", "take_id": "t", "line_index": 0}]},
-            )
-        sid = created.json()["scrapbook_id"]
-        self.assertEqual(created.json()["bpm"], 90.0)
-        self.assertFalse(created.json()["bpm_manual"])
-
-        # Adding more lines keeps the BPM glued to their median.
-        with mock.patch.object(server, "_line_data", return_value={"bpm": 90.0}):
-            updated = self.client.patch(
-                f"/scrapbooks/{sid}",
-                json={
-                    "lines": [
-                        {"session_id": "s", "take_id": "t", "line_index": 0},
-                        {"session_id": "s", "take_id": "t", "line_index": 1},
-                    ]
-                },
-            )
-        self.assertEqual(updated.json()["bpm"], 90.0)
-
-        # Setting it explicitly pins it, and later edits leave it alone.
-        pinned = self.client.patch(f"/scrapbooks/{sid}", json={"bpm": 140})
-        self.assertEqual(pinned.json()["bpm"], 140.0)
-        self.assertTrue(pinned.json()["bpm_manual"])
-
-        with mock.patch.object(server, "_line_data", return_value={"bpm": 90.0}):
-            again = self.client.patch(
-                f"/scrapbooks/{sid}",
-                json={"lines": [{"session_id": "s", "take_id": "t", "line_index": 0}]},
-            )
-        self.assertEqual(again.json()["bpm"], 140.0)
-        self.assertTrue(again.json()["bpm_manual"])
-
-        # Handing it back to automatic follows the lines again.
-        with mock.patch.object(server, "_line_data", return_value={"bpm": 90.0}):
-            auto = self.client.patch(f"/scrapbooks/{sid}", json={"bpm_manual": False})
-        self.assertEqual(auto.json()["bpm"], 90.0)
-        self.assertFalse(auto.json()["bpm_manual"])
 
 
 if __name__ == "__main__":

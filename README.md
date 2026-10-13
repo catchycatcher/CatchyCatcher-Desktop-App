@@ -226,7 +226,7 @@ Scrapbooks live beside the sessions:
 ```
 scrapbooks/
   <scrapbook_id>/
-    scrapbook.json       # name, bpm, ordered line refs, cached render
+    scrapbook.json       # name, ordered line refs, cached render
     mix.m4a              # the rendered, tempo-matched mix
     render/              # per-line/gap scratch WAVs (safe to delete)
 ```
@@ -293,25 +293,33 @@ headers.
 
 ### Scrapbooks
 
-A scrapbook is an ordered list of lines lifted from processed takes, with one
-BPM every line is stretched to (pitch-preserving). It is the only place lines can
-be added, removed or reordered. Editing invalidates the cached render.
+A scrapbook is an ordered list of lines lifted from processed takes. It is the
+only place lines can be added, removed or reordered. Editing invalidates the
+cached render.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/scrapbooks` | List scrapbooks, most recently updated first. |
-| `POST` | `/scrapbooks` | Create from `{name, lines}` (`lines` are `{session_id, take_id, line_index}`). The BPM starts as the median of the lines' takes. |
+| `POST` | `/scrapbooks` | Create from `{name, lines}` (`lines` are `{session_id, take_id, line_index}`). |
 | `GET` | `/scrapbooks/{scrapbook_id}` | One scrapbook with its lines and last render. |
-| `PATCH` | `/scrapbooks/{scrapbook_id}` | Update `name`/`bpm`/`lines`. Setting `bpm` pins it; `bpm_manual: false` hands it back to the automatic median. |
+| `PATCH` | `/scrapbooks/{scrapbook_id}` | Update `name`/`lines`. |
 | `DELETE` | `/scrapbooks/{scrapbook_id}` | Delete a scrapbook and its mix. |
 | `POST` | `/scrapbooks/{scrapbook_id}/render` | Render (or return the cached) mix + word timeline. |
 | `GET` | `/scrapbooks/{scrapbook_id}/audio` | Stream the rendered mix (`audio/mp4`). |
 
-Rendering cuts `[start time, end time]` from each line's isolated vocals, applies
-`atempo = scrapbook_bpm / line_bpm`, and inserts a gap between each pair. The gap
-is the mean of the pause that followed the first line and the pause that preceded
-the second line in their own journals, each scaled by its own tempo change (with
-a fallback when a line was at the edge of its journal).
+There is **no global BPM**. Each line keeps its recorded tempo; only the
+*relative* tempo between neighbours is adjusted. Every line knows two expected
+ratios from its own journal — to the line that followed it (`after`) and to the
+line that preceded it (`before`). When line B is placed after line A, the speed
+applied to B is whichever of A's `after` / B's `before` needs the smallest change
+from B's own tempo. All the speeds are then normalised so the median log-speed is
+zero (half speed up, half slow down, no overall shift), then each line is
+cut from its isolated vocals with pitch-preserving `atempo`.
+
+The gap between two lines is the mean of the pause that followed the first and
+the pause that preceded the second in their own journals, each divided by that
+line's new speed (fallback when a line was at the edge of its journal), and is
+clamped to a sane range.
 
 ### Example
 

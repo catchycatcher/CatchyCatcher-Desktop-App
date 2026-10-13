@@ -49,14 +49,14 @@ Endpoints
 Scrapbooks
 ----------
 ``GET    /scrapbooks``
-    List scrapbooks (``{scrapbook_id, name, bpm, line_count, ...}``).
+    List scrapbooks (``{scrapbook_id, name, line_count, ...}``).
 ``POST   /scrapbooks``
-    Create one from ``{name, bpm, lines}`` where each line is
+    Create one from ``{name, lines}`` where each line is
     ``{session_id, take_id, line_index}``.
 ``GET    /scrapbooks/{scrapbook_id}``
     One scrapbook, with its lines and last render.
 ``PATCH  /scrapbooks/{scrapbook_id}``
-    Update ``name``/``bpm``/``lines`` (edits invalidate the render).
+    Update ``name``/``lines`` (edits invalidate the render).
 ``DELETE /scrapbooks/{scrapbook_id}``
     Delete a scrapbook and its mix.
 ``POST   /scrapbooks/{scrapbook_id}/render``
@@ -813,10 +813,10 @@ def process_session_endpoint(
 # Scrapbooks
 # ---------------------------------------------------------------------------
 #
-# A scrapbook is an ordered list of lines referenced from processed takes, plus
-# one BPM every line is stretched to. It is the *only* place lines can be added,
-# removed or reordered. Rendering stitches the isolated vocals into one mix; the
-# result is cached against a signature of the BPM + line list.
+# A scrapbook is an ordered list of lines referenced from processed takes. It is
+# the *only* place lines can be added, removed or reordered. Each line keeps its
+# recorded tempo; only the relative tempo between neighbours is adjusted when
+# rendering. The result is cached against a signature of the line list.
 
 
 def _scrapbook_dir(scrapbook_id: str) -> Path:
@@ -857,35 +857,8 @@ def _normalize_lines(lines: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def _clean_bpm(bpm: Any, fallback: float = 120.0) -> float:
-    try:
-        value = float(bpm)
-    except (TypeError, ValueError):
-        return fallback
-    if value <= 20 or value >= 400:
-        return fallback
-    return round(value, 1)
-
-
-def _median_line_bpm(lines: list[dict[str, Any]], fallback: float = 120.0) -> float:
-    """Median BPM of the lines' source takes, or ``fallback`` when unknown."""
-    bpms: list[float] = []
-    for ref in lines:
-        try:
-            bpms.append(float(_line_data(ref)["bpm"]))
-        except HTTPException:
-            continue
-    usable = sorted(value for value in bpms if value > 20)
-    if not usable:
-        return fallback
-    middle = len(usable) // 2
-    if len(usable) % 2:
-        return round(usable[middle], 1)
-    return round((usable[middle - 1] + usable[middle]) / 2, 1)
-
-
-def _scrapbook_signature(bpm: float, lines: list[dict[str, Any]]) -> str:
-    payload = json.dumps({"bpm": bpm, "lines": lines}, sort_keys=True)
+def _scrapbook_signature(lines: list[dict[str, Any]]) -> str:
+    payload = json.dumps({"lines": lines}, sort_keys=True)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
@@ -900,8 +873,6 @@ def _scrapbook_summary(meta: dict[str, Any]) -> dict[str, Any]:
     return {
         "scrapbook_id": meta.get("scrapbook_id"),
         "name": meta.get("name"),
-        "bpm": meta.get("bpm"),
-        "bpm_manual": bool(meta.get("bpm_manual", False)),
         "line_count": len(meta.get("lines") or []),
         "created_at": meta.get("created_at"),
         "updated_at": meta.get("updated_at"),
@@ -930,6 +901,8 @@ def _line_data(ref: dict[str, Any]) -> dict[str, Any]:
     following = lyrics[index + 1] if index + 1 < len(lyrics) else None
     return {
         "bpm": float(line.get("bpm") or 120.0),
+        "prev_bpm": float(previous.get("bpm") or 0.0) if previous else None,
+        "next_bpm": float(following.get("bpm") or 0.0) if following else None,
         "start": float(line["start time"]),
         "end": float(line["end time"]),
         "words": line.get("words") or [],
@@ -945,9 +918,8 @@ def _line_data(ref: dict[str, Any]) -> dict[str, Any]:
 
 def _render_scrapbook(meta: dict[str, Any]) -> dict[str, Any]:
     sid = str(meta["scrapbook_id"])
-    bpm = _clean_bpm(meta.get("bpm"))
     lines = meta.get("lines") or []
-    signature = _scrapbook_signature(bpm, lines)
+    signature = _scrapbook_signature(lines)
     mix = _scrapbook_dir(sid) / "mix.m4a"
 
     cached = meta.get("render")
@@ -963,12 +935,11 @@ def _render_scrapbook(meta: dict[str, Any]) -> dict[str, Any]:
         entry["source"] = ref
         entries.append(entry)
     with PROCESS_LOCK:
-        timeline, gaps, _mix = scrapbook.render(entries, bpm, _scrapbook_dir(sid))
+        timeline, gaps, _mix = scrapbook.render(entries, _scrapbook_dir(sid))
 
     render = {
         "signature": signature,
         "audio": f"/scrapbooks/{sid}/audio",
-        "bpm": bpm,
         "timeline": timeline,
         "gaps": gaps,
         "rendered_at": _now(),
@@ -1003,19 +974,16 @@ def list_scrapbooks() -> dict[str, Any]:
 def create_scrapbook(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
     """Create a scrapbook from ``{name, lines}``.
 
-    The BPM starts as the median of the lines' source takes (120 when empty) and
-    keeps tracking it until the client sets ``bpm`` explicitly.
+    There is no global BPM: each line keeps its recorded tempo and only the
+    relative tempo between neighbours is adjusted when rendering.
     """
     name = _clean_name(body.get("name"), "Scrapbook")
     lines = _normalize_lines(body.get("lines"))
-    bpm = _median_line_bpm(lines)
     scrapbook_id = f"sb-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
     now = _now()
     meta = {
         "scrapbook_id": scrapbook_id,
         "name": name,
-        "bpm": bpm,
-        "bpm_manual": False,
         "lines": lines,
         "created_at": now,
         "updated_at": now,
@@ -1039,27 +1007,12 @@ def get_scrapbook(scrapbook_id: str) -> dict[str, Any]:
 def update_scrapbook(
     scrapbook_id: str, body: dict[str, Any] = Body(default={})
 ) -> dict[str, Any]:
-    """Update ``name``, ``bpm`` and/or ``lines``. Edits invalidate the render.
-
-    Setting ``bpm`` marks it manual (it then stops tracking the lines); pass
-    ``bpm_manual: false`` to hand it back to the automatic median.
-    """
+    """Update ``name`` and/or ``lines``. Edits invalidate the render."""
     meta = _load_scrapbook(scrapbook_id)
-    manual = bool(meta.get("bpm_manual", False))
-    if "bpm_manual" in body:
-        manual = bool(body.get("bpm_manual"))
-
     if "name" in body:
         meta["name"] = _clean_name(body.get("name"), meta.get("name") or "Scrapbook")
     if "lines" in body:
         meta["lines"] = _normalize_lines(body.get("lines"))
-    if "bpm" in body:
-        meta["bpm"] = _clean_bpm(body.get("bpm"), meta.get("bpm") or 120.0)
-        manual = True
-
-    meta["bpm_manual"] = manual
-    if not manual:
-        meta["bpm"] = _median_line_bpm(meta.get("lines") or [], meta.get("bpm") or 120.0)
 
     meta["updated_at"] = _now()
     _write_json(_scrapbook_meta_path(scrapbook_id), meta)
