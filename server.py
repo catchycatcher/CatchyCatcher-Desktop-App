@@ -118,6 +118,7 @@ Configuration is via environment variables:
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import hashlib
 import json
@@ -133,7 +134,7 @@ from typing import Any
 
 from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 import pipeline
 import scrapbook
@@ -254,6 +255,65 @@ async def log_request(request: Request, call_next):
         (time.perf_counter() - started) * 1000,
     )
     return response
+
+
+# ---------------------------------------------------------------------------
+# Live updates (Server-Sent Events)
+# ---------------------------------------------------------------------------
+#
+# Everyone connected to the same server subscribes to ``/events``. Any
+# successful write (a take, a scribble, a scrapbook) broadcasts a small "change"
+# event, and the clients refetch what they show, so two people see each other's
+# work without reloading.
+
+_CHANGE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_event_subscribers: set[asyncio.Queue] = set()
+
+
+async def _broadcast_change(request: Request) -> None:
+    event = {"method": request.method, "path": request.url.path}
+    for queue in list(_event_subscribers):
+        try:
+            queue.put_nowait(event)
+        except Exception:  # pragma: no cover - a full queue just drops the event
+            pass
+
+
+@app.middleware("http")
+async def broadcast_changes(request: Request, call_next):
+    """Tell subscribers about any write that succeeded."""
+    response = await call_next(request)
+    if request.method in _CHANGE_METHODS and response.status_code < 400:
+        await _broadcast_change(request)
+    return response
+
+
+@app.get("/events")
+async def events(request: Request) -> StreamingResponse:
+    """Stream a ``change`` event whenever something on the server is written."""
+    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+    _event_subscribers.add(queue)
+
+    async def stream():
+        try:
+            yield "event: hello\ndata: {}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                yield f"event: change\ndata: {json.dumps(event)}\n\n"
+        finally:
+            _event_subscribers.discard(queue)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +624,7 @@ def root() -> dict[str, Any]:
     return {
         "name": "Catchy Catcher Processing Engine",
         "endpoints": [
+            "GET /events",
             "POST /sessions/{session_id}/takes/{take_id}",
             "POST /sessions/{session_id}/takes/{take_id}/process",
             "GET /sessions",
