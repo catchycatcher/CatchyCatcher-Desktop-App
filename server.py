@@ -834,14 +834,17 @@ def replace_lyrics(
         end = words[-1]["end"]
         start_sample = max(0, int(start * sample_rate))
         end_sample = max(start_sample, int(end * sample_rate))
-        new_lines.append(
-            {
-                "bpm": pipeline.estimate_line_bpm(audio[start_sample:end_sample], sample_rate),
-                "start time": start,
-                "end time": end,
-                "words": words,
-            }
-        )
+        line: dict[str, Any] = {
+            "bpm": pipeline.estimate_line_bpm(audio[start_sample:end_sample], sample_rate),
+            "start time": start,
+            "end time": end,
+            "words": words,
+        }
+        # A ``raw`` line is mid-re-split: shown as plain text (no bubble) until
+        # the user carves bubbles out of it.
+        if isinstance(item, dict) and item.get("raw"):
+            line["raw"] = True
+        new_lines.append(line)
 
     if not new_lines:
         raise HTTPException(status_code=400, detail="No usable words in the new lines.")
