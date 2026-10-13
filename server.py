@@ -83,20 +83,23 @@ mirror the take routes.
 
 Scrapbooks
 ----------
-``GET    /scrapbooks``
-    List scrapbooks (``{scrapbook_id, name, line_count, ...}``).
-``POST   /scrapbooks``
+A scrapbook is scoped to one session (stored under that session's folder) and is
+an ordered list of lines referenced from processed takes.
+
+``GET    /sessions/{session_id}/scrapbooks``
+    List a session's scrapbooks (``{scrapbook_id, name, line_count, ...}``).
+``POST   /sessions/{session_id}/scrapbooks``
     Create one from ``{name, lines}`` where each line is
     ``{session_id, take_id, line_index}``.
-``GET    /scrapbooks/{scrapbook_id}``
+``GET    /sessions/{session_id}/scrapbooks/{scrapbook_id}``
     One scrapbook, with its lines and last render.
-``PATCH  /scrapbooks/{scrapbook_id}``
+``PATCH  /sessions/{session_id}/scrapbooks/{scrapbook_id}``
     Update ``name``/``lines`` (edits invalidate the render).
-``DELETE /scrapbooks/{scrapbook_id}``
+``DELETE /sessions/{session_id}/scrapbooks/{scrapbook_id}``
     Delete a scrapbook and its mix.
-``POST   /scrapbooks/{scrapbook_id}/render``
+``POST   /sessions/{session_id}/scrapbooks/{scrapbook_id}/render``
     Render (or return the cached) tempo-matched mix and word timeline.
-``GET    /scrapbooks/{scrapbook_id}/audio``
+``GET    /sessions/{session_id}/scrapbooks/{scrapbook_id}/audio``
     Stream a scrapbook's rendered mix.
 
 Configuration is via environment variables:
@@ -141,11 +144,6 @@ SESSIONS_DIR = Path(
     os.environ.get("CATCHYCATCHER_UPLOAD_DIR", BASE_DIR / "sessions")
 ).resolve()
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-
-SCRAPBOOKS_DIR = Path(
-    os.environ.get("CATCHYCATCHER_SCRAPBOOK_DIR", BASE_DIR / "scrapbooks")
-).resolve()
-SCRAPBOOKS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Scribbles are a journal shared across every session. They live in a reserved
 # session folder so takes, stems, lyric edits and scrapbook line references all
@@ -593,13 +591,13 @@ def root() -> dict[str, Any]:
             "GET /scribbles/{scribble_id}/audio/{stem}",
             "GET /scribbles/{scribble_id}/original",
             "DELETE /scribbles/{scribble_id}",
-            "GET /scrapbooks",
-            "POST /scrapbooks",
-            "GET /scrapbooks/{scrapbook_id}",
-            "PATCH /scrapbooks/{scrapbook_id}",
-            "DELETE /scrapbooks/{scrapbook_id}",
-            "POST /scrapbooks/{scrapbook_id}/render",
-            "GET /scrapbooks/{scrapbook_id}/audio",
+            "GET /sessions/{session_id}/scrapbooks",
+            "POST /sessions/{session_id}/scrapbooks",
+            "GET /sessions/{session_id}/scrapbooks/{scrapbook_id}",
+            "PATCH /sessions/{session_id}/scrapbooks/{scrapbook_id}",
+            "DELETE /sessions/{session_id}/scrapbooks/{scrapbook_id}",
+            "POST /sessions/{session_id}/scrapbooks/{scrapbook_id}/render",
+            "GET /sessions/{session_id}/scrapbooks/{scrapbook_id}/audio",
         ],
         "docs": "/docs",
     }
@@ -1279,12 +1277,13 @@ def delete_scribble(scribble_id: str) -> dict[str, Any]:
 # rendering. The result is cached against a signature of the line list.
 
 
-def _scrapbook_dir(scrapbook_id: str) -> Path:
-    return SCRAPBOOKS_DIR / sanitize_id(scrapbook_id)
+def _scrapbook_dir(session_id: str, scrapbook_id: str) -> Path:
+    """Scrapbooks live inside their session so deleting a session cleans them up."""
+    return _session_dir(session_id) / "scrapbooks" / sanitize_id(scrapbook_id)
 
 
-def _scrapbook_meta_path(scrapbook_id: str) -> Path:
-    return _scrapbook_dir(scrapbook_id) / "scrapbook.json"
+def _scrapbook_meta_path(session_id: str, scrapbook_id: str) -> Path:
+    return _scrapbook_dir(session_id, scrapbook_id) / "scrapbook.json"
 
 
 def _normalize_lines(lines: Any) -> list[dict[str, Any]]:
@@ -1349,8 +1348,8 @@ def _scrapbook_signature(lines: list[dict[str, Any]]) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
-def _load_scrapbook(scrapbook_id: str) -> dict[str, Any]:
-    meta = _read_json(_scrapbook_meta_path(scrapbook_id))
+def _load_scrapbook(session_id: str, scrapbook_id: str) -> dict[str, Any]:
+    meta = _read_json(_scrapbook_meta_path(session_id, scrapbook_id))
     if not isinstance(meta, dict):
         raise HTTPException(status_code=404, detail=f"Unknown scrapbook {scrapbook_id!r}.")
     return meta
@@ -1406,11 +1405,12 @@ def _line_data(ref: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _render_scrapbook(meta: dict[str, Any]) -> dict[str, Any]:
+def _render_scrapbook(session_id: str, meta: dict[str, Any]) -> dict[str, Any]:
     sid = str(meta["scrapbook_id"])
     lines = meta.get("lines") or []
     signature = _scrapbook_signature(lines)
-    mix = _scrapbook_dir(sid) / "mix.m4a"
+    book_dir = _scrapbook_dir(session_id, sid)
+    mix = book_dir / "mix.m4a"
 
     cached = meta.get("render")
     if isinstance(cached, dict) and cached.get("signature") == signature and mix.is_file():
@@ -1421,32 +1421,34 @@ def _render_scrapbook(meta: dict[str, Any]) -> dict[str, Any]:
 
     entries = [_scrapbook_entry(ref) for ref in lines]
     with PROCESS_LOCK:
-        timeline, gaps, _mix = scrapbook.render(entries, _scrapbook_dir(sid))
+        timeline, gaps, _mix = scrapbook.render(entries, book_dir)
 
     render = {
         "signature": signature,
-        "audio": f"/scrapbooks/{sid}/audio",
+        "audio": f"/sessions/{sanitize_id(session_id)}/scrapbooks/{sid}/audio",
         "timeline": timeline,
         "gaps": gaps,
         "rendered_at": _now(),
     }
     # Merge into the *current* file: an edit may have landed while we rendered,
     # and its lines must not be overwritten by our older snapshot.
-    current = _read_json(_scrapbook_meta_path(sid))
+    meta_path = _scrapbook_meta_path(session_id, sid)
+    current = _read_json(meta_path)
     if not isinstance(current, dict):
         current = meta
     current["render"] = render
     current["updated_at"] = _now()
-    _write_json(_scrapbook_meta_path(sid), current)
+    _write_json(meta_path, current)
     return render
 
 
-@app.get("/scrapbooks")
-def list_scrapbooks() -> dict[str, Any]:
-    """List scrapbooks, most recently updated first."""
+@app.get("/sessions/{session_id}/scrapbooks")
+def list_scrapbooks(session_id: str) -> dict[str, Any]:
+    """List a session's scrapbooks, most recently updated first."""
+    scrapbooks_dir = _session_dir(session_id) / "scrapbooks"
     items = []
-    if SCRAPBOOKS_DIR.is_dir():
-        for path in SCRAPBOOKS_DIR.iterdir():
+    if scrapbooks_dir.is_dir():
+        for path in scrapbooks_dir.iterdir():
             if not path.is_dir():
                 continue
             meta = _read_json(path / "scrapbook.json")
@@ -1456,82 +1458,84 @@ def list_scrapbooks() -> dict[str, Any]:
     return {"scrapbooks": items}
 
 
-@app.post("/scrapbooks")
-def create_scrapbook(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
-    """Create a scrapbook from ``{name, lines}``.
+@app.post("/sessions/{session_id}/scrapbooks")
+def create_scrapbook(session_id: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    """Create a scrapbook in ``session_id`` from ``{name, lines}``.
 
     There is no global BPM: each line keeps its recorded tempo and only the
     relative tempo between neighbours is adjusted when rendering.
     """
+    sid = sanitize_id(session_id)
     name = _clean_name(body.get("name"), "Scrapbook")
     lines = _normalize_lines(body.get("lines"))
     scrapbook_id = f"sb-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{os.urandom(2).hex()}"
     now = _now()
     meta = {
         "scrapbook_id": scrapbook_id,
+        "session_id": sid,
         "name": name,
         "lines": lines,
         "created_at": now,
         "updated_at": now,
     }
-    _scrapbook_dir(scrapbook_id).mkdir(parents=True, exist_ok=True)
-    _write_json(_scrapbook_meta_path(scrapbook_id), meta)
+    _scrapbook_dir(sid, scrapbook_id).mkdir(parents=True, exist_ok=True)
+    _write_json(_scrapbook_meta_path(sid, scrapbook_id), meta)
     return _scrapbook_summary(meta)
 
 
-@app.get("/scrapbooks/{scrapbook_id}")
-def get_scrapbook(scrapbook_id: str) -> dict[str, Any]:
+@app.get("/sessions/{session_id}/scrapbooks/{scrapbook_id}")
+def get_scrapbook(session_id: str, scrapbook_id: str) -> dict[str, Any]:
     """Return a scrapbook with its lines and last render, if any."""
-    meta = _load_scrapbook(scrapbook_id)
+    meta = _load_scrapbook(session_id, scrapbook_id)
     result = _scrapbook_summary(meta)
     result["lines"] = meta.get("lines") or []
     result["render"] = meta.get("render")
     return result
 
 
-@app.patch("/scrapbooks/{scrapbook_id}")
+@app.patch("/sessions/{session_id}/scrapbooks/{scrapbook_id}")
 def update_scrapbook(
-    scrapbook_id: str, body: dict[str, Any] = Body(default={})
+    session_id: str, scrapbook_id: str, body: dict[str, Any] = Body(default={})
 ) -> dict[str, Any]:
     """Update ``name`` and/or ``lines``. Edits invalidate the render."""
-    meta = _load_scrapbook(scrapbook_id)
+    meta = _load_scrapbook(session_id, scrapbook_id)
     if "name" in body:
         meta["name"] = _clean_name(body.get("name"), meta.get("name") or "Scrapbook")
     if "lines" in body:
         meta["lines"] = _normalize_lines(body.get("lines"))
 
     meta["updated_at"] = _now()
-    _write_json(_scrapbook_meta_path(scrapbook_id), meta)
+    _write_json(_scrapbook_meta_path(session_id, scrapbook_id), meta)
     result = _scrapbook_summary(meta)
     result["lines"] = meta.get("lines") or []
     result["render"] = meta.get("render")
     return result
 
 
-@app.delete("/scrapbooks/{scrapbook_id}")
-def delete_scrapbook(scrapbook_id: str) -> dict[str, Any]:
+@app.delete("/sessions/{session_id}/scrapbooks/{scrapbook_id}")
+def delete_scrapbook(session_id: str, scrapbook_id: str) -> dict[str, Any]:
     """Delete a scrapbook and its rendered mix."""
     sid = sanitize_id(scrapbook_id)
-    path = _scrapbook_dir(sid)
+    path = _scrapbook_dir(session_id, sid)
     if not path.is_dir():
         raise HTTPException(status_code=404, detail=f"Unknown scrapbook {sid!r}.")
     shutil.rmtree(path)
     return {"deleted": True, "scrapbook_id": sid}
 
 
-@app.post("/scrapbooks/{scrapbook_id}/render")
-def render_scrapbook(scrapbook_id: str) -> dict[str, Any]:
+@app.post("/sessions/{session_id}/scrapbooks/{scrapbook_id}/render")
+def render_scrapbook(session_id: str, scrapbook_id: str) -> dict[str, Any]:
     """Render (or return the cached) tempo-matched mix for a scrapbook."""
-    meta = _load_scrapbook(scrapbook_id)
-    return _render_scrapbook(meta)
+    meta = _load_scrapbook(session_id, scrapbook_id)
+    return _render_scrapbook(session_id, meta)
 
 
-@app.get("/scrapbooks/{scrapbook_id}/audio")
-def get_scrapbook_audio(scrapbook_id: str) -> FileResponse:
+@app.get("/sessions/{session_id}/scrapbooks/{scrapbook_id}/audio")
+def get_scrapbook_audio(session_id: str, scrapbook_id: str) -> FileResponse:
     """Stream a scrapbook's rendered mix."""
-    meta = _load_scrapbook(scrapbook_id)
+    meta = _load_scrapbook(session_id, scrapbook_id)
     sid = str(meta["scrapbook_id"])
-    mix = _scrapbook_dir(sid) / "mix.m4a"
+    mix = _scrapbook_dir(session_id, sid) / "mix.m4a"
     if not mix.is_file():
         raise HTTPException(status_code=404, detail="Scrapbook has not been rendered.")
     return FileResponse(mix, media_type="audio/mp4", filename=f"{sid}.m4a")

@@ -190,7 +190,6 @@ Open `http://<desktop-ip>:8000/docs` for interactive Swagger UI.
 | `CATCHYCATCHER_HOST` | `0.0.0.0` | Bind host. |
 | `CATCHYCATCHER_PORT` | `8000` | Bind port. |
 | `CATCHYCATCHER_UPLOAD_DIR` | `./sessions` | Session storage root. |
-| `CATCHYCATCHER_SCRAPBOOK_DIR` | `./scrapbooks` | Scrapbook storage root. |
 | `CATCHYCATCHER_CORS_ORIGINS` | `*` | Comma-separated allowed origins, or `*`. |
 | `CATCHYCATCHER_LOG_LEVEL` | `info` | Uvicorn log level (`run.py` sets `warning` unless `--verbose`). |
 | `CATCHYCATCHER_REQUEST_LOG` | `info` | Level for the per-request log line; `off` silences it. |
@@ -212,6 +211,11 @@ sessions/
         result.json      # the spec dict, once finished
         vocals.m4a
         background.m4a
+    scrapbooks/
+      <scrapbook_id>/
+        scrapbook.json   # name, ordered line refs, cached render
+        mix.m4a          # the rendered, tempo-matched mix
+        render/          # per-line/gap scratch WAVs (safe to delete)
 ```
 
 A session's `id` is its folder name (URL-safe and stable); its **display name**
@@ -221,15 +225,8 @@ existed simply fall back to showing the id.
 `session_id` and `take_id` are sanitised to a single safe path segment, so
 `../../etc` cannot escape the root.
 
-Scrapbooks live beside the sessions:
-
-```
-scrapbooks/
-  <scrapbook_id>/
-    scrapbook.json       # name, ordered line refs, cached render
-    mix.m4a              # the rendered, tempo-matched mix
-    render/              # per-line/gap scratch WAVs (safe to delete)
-```
+Scrapbooks are scoped to their session and live inside its folder, so deleting a
+session deletes its scrapbooks too.
 
 A scrapbook line is just `{session_id, take_id, line_index}`; the audio is always
 read fresh from the referenced take's `vocals.m4a`.
@@ -298,19 +295,19 @@ headers.
 
 ### Scrapbooks
 
-A scrapbook is an ordered list of lines lifted from processed takes. It is the
-only place lines can be added, removed or reordered. Editing invalidates the
-cached render.
+A scrapbook is scoped to one session and is an ordered list of lines lifted from
+processed takes. It is the only place lines can be added, removed or reordered.
+Editing invalidates the cached render.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/scrapbooks` | List scrapbooks, most recently updated first. |
-| `POST` | `/scrapbooks` | Create from `{name, lines}` (`lines` are `{session_id, take_id, line_index}`). |
-| `GET` | `/scrapbooks/{scrapbook_id}` | One scrapbook with its lines and last render. |
-| `PATCH` | `/scrapbooks/{scrapbook_id}` | Update `name`/`lines`. |
-| `DELETE` | `/scrapbooks/{scrapbook_id}` | Delete a scrapbook and its mix. |
-| `POST` | `/scrapbooks/{scrapbook_id}/render` | Render (or return the cached) mix + word timeline. |
-| `GET` | `/scrapbooks/{scrapbook_id}/audio` | Stream the rendered mix (`audio/mp4`). |
+| `GET` | `/sessions/{session_id}/scrapbooks` | List that session's scrapbooks, most recently updated first. |
+| `POST` | `/sessions/{session_id}/scrapbooks` | Create from `{name, lines}` (`lines` are `{session_id, take_id, line_index}`). |
+| `GET` | `/sessions/{session_id}/scrapbooks/{scrapbook_id}` | One scrapbook with its lines and last render. |
+| `PATCH` | `/sessions/{session_id}/scrapbooks/{scrapbook_id}` | Update `name`/`lines`. |
+| `DELETE` | `/sessions/{session_id}/scrapbooks/{scrapbook_id}` | Delete a scrapbook and its mix. |
+| `POST` | `/sessions/{session_id}/scrapbooks/{scrapbook_id}/render` | Render (or return the cached) mix + word timeline. |
+| `GET` | `/sessions/{session_id}/scrapbooks/{scrapbook_id}/audio` | Stream the rendered mix (`audio/mp4`). |
 
 There is **no global BPM**. Each line keeps its recorded tempo; only the
 *relative* tempo between neighbours is adjusted.

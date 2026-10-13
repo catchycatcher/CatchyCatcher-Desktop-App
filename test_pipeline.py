@@ -835,18 +835,13 @@ class ApiTests(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="catchy_api_")
-        self.scrapbook_dir = tempfile.mkdtemp(prefix="catchy_sb_")
         self._orig_sessions = server.SESSIONS_DIR
-        self._orig_scrapbooks = server.SCRAPBOOKS_DIR
         server.SESSIONS_DIR = Path(self.temp_dir)
-        server.SCRAPBOOKS_DIR = Path(self.scrapbook_dir)
         self.client = TestClient(server.app)
 
     def tearDown(self):
         server.SESSIONS_DIR = self._orig_sessions
-        server.SCRAPBOOKS_DIR = self._orig_scrapbooks
         shutil.rmtree(self.temp_dir, ignore_errors=True)
-        shutil.rmtree(self.scrapbook_dir, ignore_errors=True)
 
     @staticmethod
     def _fake_process(holder):
@@ -1250,15 +1245,15 @@ class ApiTests(unittest.TestCase):
                 "/sessions/snap/takes/t", files={"file": ("t.m4a", b"x", "audio/mp4")}
             )
         created = self.client.post(
-            "/scrapbooks",
+            "/sessions/snap/scrapbooks",
             json={"name": "S", "lines": [{"session_id": "snap", "take_id": "t", "line_index": 0}]},
         )
         sid = created.json()["scrapbook_id"]
-        snapshot = self.client.get(f"/scrapbooks/{sid}").json()["lines"][0]["data"]
+        snapshot = self.client.get(f"/sessions/snap/scrapbooks/{sid}").json()["lines"][0]["data"]
 
         # Changing the journal line must not touch the scrapbook's copy.
         self.client.patch("/sessions/snap/takes/t/lines/0", params={"text": "totally different"})
-        again = self.client.get(f"/scrapbooks/{sid}").json()["lines"][0]["data"]
+        again = self.client.get(f"/sessions/snap/scrapbooks/{sid}").json()["lines"][0]["data"]
         self.assertEqual(again["words"], snapshot["words"])
 
     def test_scrapbook_lifecycle_and_render(self):
@@ -1270,7 +1265,7 @@ class ApiTests(unittest.TestCase):
             )
 
         created = self.client.post(
-            "/scrapbooks",
+            "/sessions/src/scrapbooks",
             json={
                 "name": "My Mix",
                 "lines": [
@@ -1284,8 +1279,11 @@ class ApiTests(unittest.TestCase):
         sid = created.json()["scrapbook_id"]
         self.assertEqual(created.json()["line_count"], 1)
 
-        listed = self.client.get("/scrapbooks").json()["scrapbooks"]
+        listed = self.client.get("/sessions/src/scrapbooks").json()["scrapbooks"]
         self.assertIn(sid, [item["scrapbook_id"] for item in listed])
+
+        # Another session does not see it.
+        self.assertEqual(self.client.get("/sessions/other/scrapbooks").json()["scrapbooks"], [])
 
         def fake_render(entries, output_dir):
             path = Path(output_dir)
@@ -1296,32 +1294,32 @@ class ApiTests(unittest.TestCase):
             return timeline, [], mix
 
         with mock.patch.object(server.scrapbook, "render", side_effect=fake_render) as render:
-            rendered = self.client.post(f"/scrapbooks/{sid}/render")
+            rendered = self.client.post(f"/sessions/src/scrapbooks/{sid}/render")
         self.assertEqual(rendered.status_code, 200, rendered.text)
-        self.assertEqual(rendered.json()["audio"], f"/scrapbooks/{sid}/audio")
+        self.assertEqual(rendered.json()["audio"], f"/sessions/src/scrapbooks/{sid}/audio")
         self.assertEqual(len(rendered.json()["timeline"]), 1)
         self.assertEqual(render.call_count, 1)
 
         # A second render is served from cache (the signature is unchanged).
         with mock.patch.object(server.scrapbook, "render", side_effect=fake_render) as render2:
-            again = self.client.post(f"/scrapbooks/{sid}/render")
+            again = self.client.post(f"/sessions/src/scrapbooks/{sid}/render")
         self.assertEqual(again.status_code, 200)
         render2.assert_not_called()
 
-        audio = self.client.get(f"/scrapbooks/{sid}/audio")
+        audio = self.client.get(f"/sessions/src/scrapbooks/{sid}/audio")
         self.assertEqual(audio.status_code, 200)
         self.assertEqual(audio.content, b"MIX")
 
-        updated = self.client.patch(f"/scrapbooks/{sid}", json={"lines": []})
+        updated = self.client.patch(f"/sessions/src/scrapbooks/{sid}", json={"lines": []})
         self.assertEqual(updated.status_code, 200, updated.text)
         self.assertEqual(updated.json()["line_count"], 0)
 
         # Empty scrapbooks cannot render.
-        empty = self.client.post(f"/scrapbooks/{sid}/render")
+        empty = self.client.post(f"/sessions/src/scrapbooks/{sid}/render")
         self.assertEqual(empty.status_code, 400)
 
-        self.assertEqual(self.client.delete(f"/scrapbooks/{sid}").status_code, 200)
-        self.assertEqual(self.client.get(f"/scrapbooks/{sid}").status_code, 404)
+        self.assertEqual(self.client.delete(f"/sessions/src/scrapbooks/{sid}").status_code, 200)
+        self.assertEqual(self.client.get(f"/sessions/src/scrapbooks/{sid}").status_code, 404)
 
 
 class ScribbleApiTests(unittest.TestCase):
@@ -1329,18 +1327,13 @@ class ScribbleApiTests(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="catchy_scribbles_")
-        self.scrapbook_dir = tempfile.mkdtemp(prefix="catchy_scribbles_sb_")
         self._orig_sessions = server.SESSIONS_DIR
-        self._orig_scrapbooks = server.SCRAPBOOKS_DIR
         server.SESSIONS_DIR = Path(self.temp_dir)
-        server.SCRAPBOOKS_DIR = Path(self.scrapbook_dir)
         self.client = TestClient(server.app)
 
     def tearDown(self):
         server.SESSIONS_DIR = self._orig_sessions
-        server.SCRAPBOOKS_DIR = self._orig_scrapbooks
         shutil.rmtree(self.temp_dir, ignore_errors=True)
-        shutil.rmtree(self.scrapbook_dir, ignore_errors=True)
 
     @staticmethod
     def _fake_process(holder):
@@ -1421,11 +1414,12 @@ class ScribbleApiTests(unittest.TestCase):
             self.client.post(
                 "/scribbles/idea", files={"file": ("idea.m4a", b"x", "audio/mp4")}
             )
-        sid = self.client.post("/scrapbooks", json={"name": "Book", "lines": []}).json()[
+        self.client.post("/sessions/song")
+        sid = self.client.post("/sessions/song/scrapbooks", json={"name": "Book", "lines": []}).json()[
             "scrapbook_id"
         ]
         updated = self.client.patch(
-            f"/scrapbooks/{sid}",
+            f"/sessions/song/scrapbooks/{sid}",
             json={"lines": [{"session_id": "scribbles", "take_id": "idea", "line_index": 0}]},
         )
         self.assertEqual(updated.status_code, 200, updated.text)
