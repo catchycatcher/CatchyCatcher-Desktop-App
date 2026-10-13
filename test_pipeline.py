@@ -30,6 +30,7 @@ import pipeline
 import scrapbook
 import server
 import share_code
+import tempo
 from server import sanitize_id
 
 
@@ -627,7 +628,10 @@ class ProcessSongSessionFlowTests(unittest.TestCase):
         self.assertEqual(len(result["lyrics"]), 1)
         line = result["lyrics"][0]
         self.assertEqual(set(line), {"bpm", "start time", "end time", "words"})
-        self.assertEqual(line["bpm"], 123.4)
+        # Two onsets 0.5s apart fit a 120 BPM grid (the librosa stub is no longer
+        # the primary detector).
+        self.assertAlmostEqual(line["bpm"], 120.0, delta=6.0)
+        self.assertAlmostEqual(result["bpm"], 120.0, delta=6.0)
         self.assertEqual(line["start time"], 0.0)
         self.assertEqual(line["end time"], 0.9)
         self.assertEqual(
@@ -842,6 +846,25 @@ class LineRetimeTests(unittest.TestCase):
         self.assertEqual(server._syllables("banana"), 3)
         self.assertEqual(server._syllables("make"), 1)
 
+    def test_grid_snaps_guessed_words(self):
+        original = [
+            {"word": "a", "start": 0.0, "end": 0.1},
+            {"word": "d", "start": 1.0, "end": 1.1},
+        ]
+        without = server._retime_words(original, "a b c d", 0.0, 1.1)
+        with_grid = server._retime_words(original, "a b c d", 0.0, 1.1, 120.0, 0.0)
+        # Anchors are untouched...
+        self.assertEqual(with_grid[0]["start"], 0.0)
+        self.assertEqual(with_grid[3]["start"], 1.0)
+        # ...but the guessed words move onto the grid (sixteenths at 120 BPM)...
+        self.assertNotEqual(without[1]["start"], with_grid[1]["start"])
+        for word in with_grid[1:3]:
+            self.assertAlmostEqual((word["start"] * 8) % 1.0, 0.0, places=2)
+        # ...and stay in order without overlapping.
+        self.assertLessEqual(with_grid[0]["end"], with_grid[1]["start"])
+        self.assertLessEqual(with_grid[1]["end"], with_grid[2]["start"])
+        self.assertLessEqual(with_grid[2]["end"], with_grid[3]["start"])
+
 
 class GapBlendTests(unittest.TestCase):
     """The scrapbook fills gaps with the source recordings' own gap audio."""
@@ -901,6 +924,44 @@ class GainNormalizeTests(unittest.TestCase):
 
     def test_silence_is_left_alone(self):
         self.assertEqual(float(pipeline._normalize_gain(self._FakeAudio([0.0])).max()), 0.0)
+
+
+class TempoGridTests(unittest.TestCase):
+    """Fitting a metrical grid to word onsets."""
+
+    def test_recovers_a_clean_grid(self):
+        period = 60.0 / 120.0
+        onsets = [0.5 + period * step for step in range(8)]
+        bpm, phase, score = tempo.fit_grid(onsets)
+        self.assertAlmostEqual(bpm, 120.0, delta=4.0)
+        self.assertAlmostEqual(phase, 0.5, delta=0.06)
+        self.assertLess(score, 0.02)
+
+    def test_prefers_the_beat_over_a_doubled_grid(self):
+        # Onsets on the beat at 120 must not be read as off-beat eighths at 240.
+        period = 0.5
+        onsets = [0.1 + period * step for step in range(9)]
+        bpm, _phase, _score = tempo.fit_grid(onsets)
+        self.assertAlmostEqual(bpm, 120.0, delta=6.0)
+        self.assertLess(bpm, 180.0)
+
+    def test_snaps_to_the_nearest_allowed_line(self):
+        self.assertAlmostEqual(tempo.snap_time(0.49, 120.0, 0.0), 0.5, places=3)
+        self.assertAlmostEqual(tempo.snap_time(0.26, 120.0, 0.0), 0.25, places=3)
+
+    def test_syllables_get_ordered_slots(self):
+        times = tempo.predict_syllables(0.0, 1.0, 4, 120.0, 0.0)
+        self.assertEqual(len(times), 4)
+        self.assertEqual(times, sorted(times))
+        for value in times:
+            self.assertGreaterEqual(value, 0.0)
+            self.assertLessEqual(value, 1.0)
+
+    def test_syllables_without_a_grid_are_even(self):
+        self.assertEqual(tempo.predict_syllables(0.0, 1.0, 4, 0.0, 0.0), [0.0, 0.25, 0.5, 0.75])
+
+    def test_too_few_onsets_means_no_grid(self):
+        self.assertEqual(tempo.fit_grid([1.0])[0], 0.0)
 
 
 class ApiTests(unittest.TestCase):

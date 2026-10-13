@@ -143,6 +143,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 import pipeline
 import scrapbook
+import tempo
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -692,15 +693,22 @@ def _syllables(token: str) -> int:
 
 
 def _retime_words(
-    original_words: list[dict[str, Any]], new_text: str, line_start: float, line_end: float
+    original_words: list[dict[str, Any]],
+    new_text: str,
+    line_start: float,
+    line_end: float,
+    bpm: float = 0.0,
+    phase: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Guess per-word timings for an edited line.
 
     Words present in both the original and the edit are anchors (their original
     times are kept); the words between them are guessed by spreading the
-    available time in proportion to their syllable counts. When two anchors are
-    jammed together (no room for the inserted words) a little time is borrowed
-    from those anchors so the new words still get a slice.
+    available time in proportion to their syllable counts. When a metrical grid
+    is known (``bpm``/``phase``), the guessed word boundaries are nudged onto the
+    grid, so every syllable lands in a musically sensible slot. When two anchors
+    are jammed together (no room for the inserted words) a little time is
+    borrowed from those anchors so the new words still get a slice.
     """
     tokens = [token for token in new_text.split() if token]
     if not tokens:
@@ -717,9 +725,11 @@ def _retime_words(
         autojunk=False,
     )
     times: list[tuple[float, float] | None] = [None] * len(tokens)
+    anchors = [False] * len(tokens)
     for first, second, size in matcher.get_matching_blocks():
         for step in range(size):
             times[second + step] = (original[first + step][1], original[first + step][2])
+            anchors[second + step] = True
 
     total = len(tokens)
     index = 0
@@ -764,6 +774,37 @@ def _retime_words(
             times[offset] = (cursor, cursor + share)
             cursor += share
         index = end
+
+    # Nudge guessed word boundaries onto the metrical grid, so each syllable has
+    # a sensible place. Anchors keep their original times exactly.
+    if bpm > 0:
+        snapped = list(times)
+        for position in range(len(tokens)):
+            bounds = times[position]
+            if bounds is None or anchors[position]:
+                continue
+            start, finish = bounds
+            target = tempo.snap_time(start, bpm, phase)
+            lower = times[position - 1][0] + 0.005 if position > 0 and times[position - 1] else line_start
+            upper = (
+                times[position + 1][0]
+                if position + 1 < len(tokens) and times[position + 1]
+                else line_end
+            )
+            target = max(lower, min(upper - 0.005, target))
+            snapped[position] = (target, finish)
+        # Keep every word inside its neighbour's start (words stay in order).
+        for position in range(len(tokens)):
+            if anchors[position] or snapped[position] is None:
+                continue
+            start, finish = snapped[position]
+            upper = (
+                snapped[position + 1][0]
+                if position + 1 < len(tokens) and snapped[position + 1]
+                else line_end
+            )
+            snapped[position] = (start, max(start, min(finish, upper)))
+        times = snapped
 
     result: list[dict[str, Any]] = []
     for token, bounds in zip(tokens, times):
@@ -810,8 +851,19 @@ def update_line_text(
     if display:
         if "original_words" not in line:
             line["original_words"] = line.get("words") or []
+        onsets = [
+            word.get("start")
+            for word in line["original_words"]
+            if isinstance(word, dict) and word.get("start") is not None
+        ]
+        grid_bpm, grid_phase, _score = tempo.fit_grid(onsets)
         line["words"] = _retime_words(
-            line["original_words"], display, float(line["start time"]), float(line["end time"])
+            line["original_words"],
+            display,
+            float(line["start time"]),
+            float(line["end time"]),
+            grid_bpm,
+            grid_phase,
         )
         line["text"] = display
     else:

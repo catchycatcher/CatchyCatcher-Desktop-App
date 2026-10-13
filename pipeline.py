@@ -37,7 +37,8 @@ Pipeline stages:
 3. Word grouping into lyric lines with a four-stage break model: seed each gap
    from pause size and punctuation, then a rhyme pass, a line-length pass and a
    rolling threshold decide where the lines actually break.
-4. Per-line BPM estimation with librosa.
+4. Tempo estimation by fitting a metrical grid to the word onsets (see
+   :mod:`tempo`), with the librosa estimate as a fallback.
 """
 
 from __future__ import annotations
@@ -49,6 +50,8 @@ import subprocess
 import tempfile
 import threading
 from typing import Any, Callable, Iterable
+
+import tempo
 
 import numpy as np
 
@@ -678,6 +681,17 @@ def estimate_line_bpm(
         return DEFAULT_BPM
 
 
+def _grid_bpm(words: list[dict[str, Any]]) -> float:
+    """Tempo from fitting a metrical grid to the word onsets (0.0 if too few).
+
+    This is the primary detector: a metrical grid over the words is far more
+    reliable than librosa's tempo on a bare vocal slice.
+    """
+    onsets = [float(word["start"]) for word in words if "start" in word]
+    bpm, _phase, _score = tempo.fit_grid(onsets)
+    return bpm
+
+
 # ---------------------------------------------------------------------------
 # Audio helpers
 # ---------------------------------------------------------------------------
@@ -1000,20 +1014,20 @@ def process_song_session(
     # 4. BPM: once for the whole take, and once per line (librosa)
     # ------------------------------------------------------------------
     vocal_np = vocals_tensor.mean(dim=0).cpu().numpy()
-    take_bpm = estimate_line_bpm(vocal_np, sample_rate, start_bpm)
+    take_bpm = _grid_bpm(all_words) or estimate_line_bpm(vocal_np, sample_rate, start_bpm)
 
     lyrics_output: list[dict[str, Any]] = []
     for line_words in grouped_lines:
         line_start = line_words[0]["start"]
         line_end = line_words[-1]["end"]
 
-        start_sample = max(0, int(line_start * sample_rate))
-        end_sample = max(start_sample, int(line_end * sample_rate))
-        line_slice = vocal_np[start_sample:end_sample]
+        # Tempo from the line's own word grid; fall back to the take tempo (and
+        # only then the audio estimate) when the line has too few words to fit.
+        line_bpm = _grid_bpm(line_words) or take_bpm
 
         lyrics_output.append(
             {
-                "bpm": estimate_line_bpm(line_slice, sample_rate, start_bpm),
+                "bpm": line_bpm,
                 "start time": line_start,
                 "end time": line_end,
                 "words": [

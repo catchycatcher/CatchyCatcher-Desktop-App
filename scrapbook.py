@@ -88,6 +88,22 @@ def _source_words(entry: dict[str, Any], line_start: float) -> list[tuple[str, f
     return resolved
 
 
+#: Ratios that are musically meaningful. A chosen ratio close to one of these
+#: is snapped to it, so the mix prefers a clean relationship over an arbitrary
+#: (and possibly large) stretch.
+SIMPLE_RATIOS = (0.5, 2.0 / 3.0, 0.75, 0.8, 1.0, 1.25, 4.0 / 3.0, 1.5, 2.0)
+#: How close (multiplicatively) a ratio must be to snap to a simple one.
+RATIO_TOLERANCE = 0.04
+
+
+def _snap_ratio(ratio: float) -> float:
+    """Snap ``ratio`` to the nearest musically simple ratio when it is close."""
+    nearest = min(SIMPLE_RATIOS, key=lambda simple: abs(math.log(simple) - math.log(ratio)))
+    if abs(math.log(nearest) - math.log(ratio)) <= math.log(1.0 + RATIO_TOLERANCE):
+        return nearest
+    return ratio
+
+
 def _line_speeds(entries: list[dict[str, Any]]) -> list[float]:
     """Per-line playback speed factors (1.0 = played at its recorded tempo).
 
@@ -96,7 +112,8 @@ def _line_speeds(entries: list[dict[str, Any]]) -> list[float]:
     expected to line up), rather than a scale of 1. The candidate ratios are the
     previous line's ``after`` expectation, this line's ``before`` expectation,
     and **same BPM as the previous line** (always available); the one closest to
-    the baseline wins.
+    the baseline wins, and it is snapped to a musically simple ratio when close
+    so a fitting relationship beats a large arbitrary stretch.
 
     ``speed > 1`` plays the line faster (shorter); the median log-speed is
     normalised to zero so there is no overall tempo shift.
@@ -131,6 +148,7 @@ def _line_speeds(entries: list[dict[str, Any]]) -> list[float]:
             candidates.append(float(before))
 
         chosen = min(candidates, key=lambda ratio: abs(math.log(ratio) - math.log(baseline)))
+        chosen = _snap_ratio(chosen)
         played = played * chosen
         speeds.append(played / bpm)
         previous_take_bpm = take_bpm
