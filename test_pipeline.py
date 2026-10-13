@@ -1205,6 +1205,62 @@ class ApiTests(unittest.TestCase):
             404,
         )
 
+    def test_replace_lyrics_recomputes_bpm(self):
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            self.client.post(
+                "/sessions/res/takes/t", files={"file": ("t.m4a", b"x", "audio/mp4")}
+            )
+        lines = [
+            {
+                "words": [
+                    {"word": "a", "start": 0.0, "end": 0.5},
+                    {"word": "b", "start": 0.5, "end": 1.0},
+                ]
+            },
+            {"words": [{"word": "c", "start": 1.5, "end": 2.0}]},
+        ]
+        with mock.patch.object(
+            server.pipeline,
+            "load_vocal_mono",
+            return_value=(np.zeros(44100 * 3, dtype="float32"), 44100),
+        ), mock.patch.object(
+            server.pipeline, "estimate_line_bpm", side_effect=[117.0, 90.0]
+        ):
+            resp = self.client.put("/sessions/res/takes/t/lyrics", json={"lines": lines})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        lyrics = resp.json()["lyrics"]
+        self.assertEqual([line["bpm"] for line in lyrics], [117.0, 90.0])
+        self.assertEqual(lyrics[0]["start time"], 0.0)
+        self.assertEqual(lyrics[0]["end time"], 1.0)
+        self.assertEqual([w["word"] for w in lyrics[1]["words"]], ["c"])
+        self.assertEqual(
+            self.client.get("/sessions/res/takes/t").json()["result"]["lyrics"][1]["bpm"], 90.0
+        )
+
+        empty = self.client.put("/sessions/res/takes/t/lyrics", json={"lines": []})
+        self.assertEqual(empty.status_code, 400)
+
+    def test_scrapbook_line_snapshot_survives_journal_edit(self):
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            self.client.post(
+                "/sessions/snap/takes/t", files={"file": ("t.m4a", b"x", "audio/mp4")}
+            )
+        created = self.client.post(
+            "/scrapbooks",
+            json={"name": "S", "lines": [{"session_id": "snap", "take_id": "t", "line_index": 0}]},
+        )
+        sid = created.json()["scrapbook_id"]
+        snapshot = self.client.get(f"/scrapbooks/{sid}").json()["lines"][0]["data"]
+
+        # Changing the journal line must not touch the scrapbook's copy.
+        self.client.patch("/sessions/snap/takes/t/lines/0", params={"text": "totally different"})
+        again = self.client.get(f"/scrapbooks/{sid}").json()["lines"][0]["data"]
+        self.assertEqual(again["words"], snapshot["words"])
+
     def test_scrapbook_lifecycle_and_render(self):
         with mock.patch.object(
             server.pipeline, "process_song_session", side_effect=self._fake_process([])

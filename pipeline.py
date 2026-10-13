@@ -683,6 +683,21 @@ def estimate_line_bpm(
 # ---------------------------------------------------------------------------
 
 
+def load_vocal_mono(
+    path: str, sample_rate: int = DEFAULT_SAMPLE_RATE
+) -> tuple["np.ndarray", int]:
+    """Load a vocals file as a mono numpy signal (for BPM analysis).
+
+    Raises ``RuntimeError`` (via :func:`_require_dependencies`) when the audio
+    stack is missing, so the API can report it instead of crashing.
+    """
+    import torchaudio
+
+    _require_dependencies()
+    wav, sr = _load_audio(path, sample_rate, torchaudio)
+    return wav.mean(dim=0).cpu().numpy(), sr
+
+
 def _load_audio_via_ffmpeg(
     path: str,
     target_sr: int,

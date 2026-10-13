@@ -24,6 +24,8 @@ Endpoints
     Rename a journal entry and/or toggle its ``bookmarked`` flag.
 ``PATCH  /sessions/{session_id}/takes/{take_id}/lines/{line_index}``
     Set (or clear) a line's display ``text`` override; timings are untouched.
+``PUT    /sessions/{session_id}/takes/{take_id}/lyrics``
+    Replace a take's lyric lines (re-splitting) and recompute their BPM.
 ``GET    /sessions``
     List stored sessions as ``{"id", "name", "updated_at"}`` objects, ordered by
     id.
@@ -538,6 +540,7 @@ def root() -> dict[str, Any]:
             "GET /sessions/{session_id}/takes/{take_id}",
             "PATCH /sessions/{session_id}/takes/{take_id}",
             "PATCH /sessions/{session_id}/takes/{take_id}/lines/{line_index}",
+            "PUT /sessions/{session_id}/takes/{take_id}/lyrics",
             "GET /sessions/{session_id}/takes/{take_id}/audio/{stem}",
             "GET /sessions/{session_id}/takes/{take_id}/original",
             "DELETE /sessions/{session_id}/takes/{take_id}",
@@ -772,6 +775,83 @@ def update_line_text(
     return {"take_id": tid, "line_index": line_index, "line": public}
 
 
+def _clean_words(words: Any) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    if not isinstance(words, list):
+        return cleaned
+    for word in words:
+        if not isinstance(word, dict):
+            continue
+        text = str(word.get("word", "")).strip()
+        start = word.get("start")
+        end = word.get("end")
+        if not text or start is None or end is None:
+            continue
+        start = float(start)
+        end = max(start, float(end))
+        cleaned.append(
+            {"word": text, "start": round(start, 3), "end": round(end, 3), "length": round(end - start, 3)}
+        )
+    return cleaned
+
+
+@app.put("/sessions/{session_id}/takes/{take_id}/lyrics")
+def replace_lyrics(
+    session_id: str, take_id: str, body: dict[str, Any] = Body(default={})
+) -> dict[str, Any]:
+    """Replace a take's lyric lines (re-splitting) and recompute their BPM.
+
+    Body: ``{"lines": [{"words": [...]}, ...]}``. Each new line's
+    ``start time``/``end time`` come from its first/last word, and its BPM is
+    estimated from the isolated vocal exactly like an auto-detected line.
+    """
+    lines_in = body.get("lines") if isinstance(body, dict) else None
+    if not isinstance(lines_in, list) or not lines_in:
+        raise HTTPException(status_code=400, detail="Provide at least one line.")
+
+    sid = sanitize_id(session_id)
+    tid = sanitize_id(take_id)
+    take_dir = _take_dir(sid, tid)
+    result_path = take_dir / "result.json"
+    result = _read_json(result_path)
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=404, detail="Unknown take.")
+    vocals = take_dir / "vocals.m4a"
+    if not vocals.is_file():
+        raise HTTPException(status_code=404, detail="No isolated vocals for this take.")
+
+    try:
+        audio, sample_rate = pipeline.load_vocal_mono(str(vocals))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    new_lines: list[dict[str, Any]] = []
+    for item in lines_in:
+        words = _clean_words(item.get("words") if isinstance(item, dict) else None)
+        if not words:
+            continue
+        start = words[0]["start"]
+        end = words[-1]["end"]
+        start_sample = max(0, int(start * sample_rate))
+        end_sample = max(start_sample, int(end * sample_rate))
+        new_lines.append(
+            {
+                "bpm": pipeline.estimate_line_bpm(audio[start_sample:end_sample], sample_rate),
+                "start time": start,
+                "end time": end,
+                "words": words,
+            }
+        )
+
+    if not new_lines:
+        raise HTTPException(status_code=400, detail="No usable words in the new lines.")
+
+    result["lyrics"] = new_lines
+    _write_json(result_path, result)
+    _touch_session(sid)
+    return {"lyrics": new_lines, "bpm": result.get("bpm")}
+
+
 @app.post("/sessions/{session_id}/takes/{take_id}/process")
 def process_take(
     session_id: str,
@@ -984,7 +1064,12 @@ def _scrapbook_meta_path(scrapbook_id: str) -> Path:
 
 
 def _normalize_lines(lines: Any) -> list[dict[str, Any]]:
-    """Keep only well-formed ``{session_id, take_id, line_index}`` references."""
+    """Validate scrapbook lines, snapshotting each one as it is added.
+
+    A line sent without ``data`` is resolved from the journal *now* and its
+    words/timings are stored with it, so later edits to the journal (including
+    re-splitting) cannot change a scrapbook that already contains it.
+    """
     if not isinstance(lines, list):
         return []
     normalized: list[dict[str, Any]] = []
@@ -999,18 +1084,40 @@ def _normalize_lines(lines: Any) -> list[dict[str, Any]]:
             continue
         if not session_id or not take_id or line_index < 0:
             continue
-        ref = {
-            "session_id": sanitize_id(session_id),
-            "take_id": sanitize_id(take_id),
-            "line_index": line_index,
-        }
-        # Only keep lines that actually resolve to a processed take.
-        try:
-            _line_data(ref)
-        except HTTPException:
-            continue
-        normalized.append(ref)
+
+        sid = sanitize_id(session_id)
+        tid = sanitize_id(take_id)
+        data = ref.get("data")
+        if not isinstance(data, dict):
+            try:
+                resolved = _line_data(
+                    {"session_id": sid, "take_id": tid, "line_index": line_index}
+                )
+            except HTTPException:
+                continue
+            data = {key: value for key, value in resolved.items() if key != "vocals"}
+        normalized.append(
+            {"session_id": sid, "take_id": tid, "line_index": line_index, "data": data}
+        )
     return normalized
+
+
+def _scrapbook_entry(ref: dict[str, Any]) -> dict[str, Any]:
+    """A scrapbook line's snapshot (or live data) plus its vocals path."""
+    sid = sanitize_id(str(ref.get("session_id", "")))
+    tid = sanitize_id(str(ref.get("take_id", "")))
+    index = int(ref.get("line_index", 0))
+    vocals = _take_dir(sid, tid) / "vocals.m4a"
+    if not vocals.is_file():
+        raise HTTPException(status_code=400, detail=f"No isolated vocals for {sid}/{tid}.")
+
+    data = ref.get("data")
+    if not isinstance(data, dict):
+        data = _line_data({"session_id": sid, "take_id": tid, "line_index": index})
+    entry = {key: value for key, value in data.items() if key != "vocals"}
+    entry["vocals"] = vocals
+    entry["source"] = {"session_id": sid, "take_id": tid, "line_index": index}
+    return entry
 
 
 def _scrapbook_signature(lines: list[dict[str, Any]]) -> str:
@@ -1088,11 +1195,7 @@ def _render_scrapbook(meta: dict[str, Any]) -> dict[str, Any]:
     if not lines:
         raise HTTPException(status_code=400, detail="Add at least one line before rendering.")
 
-    entries = []
-    for ref in lines:
-        entry = _line_data(ref)
-        entry["source"] = ref
-        entries.append(entry)
+    entries = [_scrapbook_entry(ref) for ref in lines]
     with PROCESS_LOCK:
         timeline, gaps, _mix = scrapbook.render(entries, _scrapbook_dir(sid))
 
