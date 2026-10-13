@@ -738,7 +738,8 @@ def _load_audio(path: str, target_sr: int, torchaudio: Any) -> tuple[Any, int]:
     """Load ``path`` as a 2-channel float tensor resampled to ``target_sr``.
 
     Demucs' ``htdemucs`` expects stereo input at ``target_sr`` (44.1 kHz), so
-    mono files are duplicated and everything is resampled when necessary.
+    mono files are duplicated and everything is resampled when necessary. The
+    result is gain-normalised (see :func:`_normalize_gain`).
     """
     try:
         wav, sr = torchaudio.load(path)
@@ -758,7 +759,32 @@ def _load_audio(path: str, target_sr: int, torchaudio: Any) -> tuple[Any, int]:
         wav = torchaudio.functional.resample(wav, sr, target_sr)
         sr = target_sr
 
-    return wav, sr
+    return _normalize_gain(wav), sr
+
+
+#: Target average level for every recording (RMS, linear ≈ -20 dBFS).
+TARGET_RMS = 0.1
+#: How much gain we will apply either way (≈ ±18 dB), so nothing is blown up.
+MAX_GAIN = 8.0
+MIN_GAIN = 0.125
+#: A recording quieter than this counts as silence and is left untouched.
+SILENCE_RMS = 0.002
+
+
+def _normalize_gain(wav: Any) -> Any:
+    """Scale a recording by one gain so every take has a consistent average level.
+
+    This is a single gain for the whole recording — not compression — so the
+    dynamics inside a take are preserved and only its overall loudness is
+    matched. The gain is clamped both ways so a very quiet take is nudged rather
+    than blown up (which would raise the noise floor), and silence is left as-is.
+    """
+    rms = float(wav.pow(2).mean().sqrt())
+    if rms < SILENCE_RMS:
+        return wav
+    gain = max(MIN_GAIN, min(MAX_GAIN, TARGET_RMS / rms))
+    return wav * gain
+
 
 
 def _export_m4a(

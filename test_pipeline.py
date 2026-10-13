@@ -482,8 +482,21 @@ class _FakeTensor:
     def __add__(self, other):
         return _FakeTensor(self.array + other.array)
 
-    def mean(self, dim=0):
-        return _FakeTensor(self.array.mean(axis=dim))
+    def __mul__(self, other):
+        factor = other.array if isinstance(other, _FakeTensor) else other
+        return _FakeTensor(self.array * factor)
+
+    def __float__(self):
+        return float(self.array)
+
+    def pow(self, exponent):
+        return _FakeTensor(self.array**exponent)
+
+    def sqrt(self):
+        return _FakeTensor(np.sqrt(self.array))
+
+    def mean(self, dim=None):
+        return _FakeTensor(self.array.mean() if dim is None else self.array.mean(axis=dim))
 
     def cpu(self):
         return self
@@ -849,6 +862,45 @@ class GapBlendTests(unittest.TestCase):
             scrapbook._write_wav(path, samples, scrapbook.SAMPLE_RATE)
             back = scrapbook._read_wav(path)
             self.assertEqual(back.shape, (500, 2))
+
+
+class GainNormalizeTests(unittest.TestCase):
+    """Every recording is levelled to a consistent average volume with one gain."""
+
+    class _FakeAudio:
+        def __init__(self, values: list[float]):
+            self.values = [float(value) for value in values]
+
+        def pow(self, exponent: float) -> "GainNormalizeTests._FakeAudio":
+            return GainNormalizeTests._FakeAudio([value**exponent for value in self.values])
+
+        def mean(self) -> "GainNormalizeTests._FakeAudio":
+            return GainNormalizeTests._FakeAudio([sum(self.values) / len(self.values)])
+
+        def sqrt(self) -> "GainNormalizeTests._FakeAudio":
+            return GainNormalizeTests._FakeAudio([value**0.5 for value in self.values])
+
+        def max(self) -> "GainNormalizeTests._FakeAudio":
+            return GainNormalizeTests._FakeAudio([max(self.values)])
+
+        def __float__(self) -> float:
+            return self.values[0]
+
+        def __mul__(self, factor: float) -> "GainNormalizeTests._FakeAudio":
+            return GainNormalizeTests._FakeAudio([value * factor for value in self.values])
+
+    def test_levels_are_matched(self):
+        quiet = pipeline._normalize_gain(self._FakeAudio([0.02] * 100))
+        loud = pipeline._normalize_gain(self._FakeAudio([0.5] * 100))
+        self.assertAlmostEqual(float(quiet.pow(2).mean().sqrt()), pipeline.TARGET_RMS, places=4)
+        self.assertAlmostEqual(float(loud.pow(2).mean().sqrt()), pipeline.TARGET_RMS, places=4)
+
+    def test_gain_is_clamped(self):
+        result = pipeline._normalize_gain(self._FakeAudio([0.003]))
+        self.assertAlmostEqual(float(result.max()), 0.003 * pipeline.MAX_GAIN, places=6)
+
+    def test_silence_is_left_alone(self):
+        self.assertEqual(float(pipeline._normalize_gain(self._FakeAudio([0.0])).max()), 0.0)
 
 
 class ApiTests(unittest.TestCase):
