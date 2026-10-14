@@ -619,8 +619,8 @@ class ProcessSongSessionFlowTests(unittest.TestCase):
                 self.input_path, output_dir=self.temp_dir
             )
 
-        # Top-level keys match the spec (plus the whole-take tempo).
-        self.assertEqual(set(result), {"vocals", "background", "bpm", "lyrics"})
+        # Top-level keys match the spec (plus the whole-take tempo and gain).
+        self.assertEqual(set(result), {"vocals", "background", "bpm", "lyrics", "gain"})
         self.assertTrue(result["vocals"].endswith("vocals.m4a"))
         self.assertTrue(result["background"].endswith("background.m4a"))
 
@@ -996,7 +996,8 @@ class ApiTests(unittest.TestCase):
 
         take = self.client.get("/sessions/song1/takes/t1").json()
         self.assertEqual(take["meta"]["status"], "done")
-        self.assertEqual(take["result"], holder[0])
+        self.assertEqual({key: value for key, value in take["result"].items() if key != "edited"}, holder[0])
+        self.assertFalse(take["result"]["edited"])
 
         audio = self.client.get("/sessions/song1/takes/t1/audio/vocals")
         self.assertEqual(audio.status_code, 200)
@@ -1006,6 +1007,55 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(
             self.client.get("/sessions/song1/takes/t1/audio/drums").status_code, 404
         )
+
+    def test_line_edits_can_be_reset(self):
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            self.client.post(
+                "/sessions/song1/takes/t1", files={"file": ("t1.m4a", b"x", "audio/mp4")}
+            )
+
+        edited = self.client.patch("/sessions/song1/takes/t1/lines/0", params={"text": "hello there"})
+        self.assertEqual(edited.status_code, 200, edited.text)
+        self.assertTrue(self.client.get("/sessions/song1/takes/t1").json()["result"]["edited"])
+
+        reset = self.client.post("/sessions/song1/takes/t1/lyrics/reset")
+        self.assertEqual(reset.status_code, 200, reset.text)
+        self.assertEqual([word["word"] for word in reset.json()["lyrics"][0]["words"]], ["hi"])
+        self.assertFalse(self.client.get("/sessions/song1/takes/t1").json()["result"]["edited"])
+
+        # A second reset has nothing to undo.
+        self.assertEqual(
+            self.client.post("/sessions/song1/takes/t1/lyrics/reset").status_code, 400
+        )
+
+    def test_deleting_a_take_removes_its_scrapbook_lines(self):
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            self.client.post(
+                "/sessions/src/takes/t1", files={"file": ("t1.m4a", b"x", "audio/mp4")}
+            )
+
+        created = self.client.post(
+            "/sessions/src/scrapbooks",
+            json={
+                "name": "Mix",
+                "lines": [{"session_id": "src", "take_id": "t1", "line_index": 0}],
+            },
+        ).json()
+        sid = created["scrapbook_id"]
+
+        usage = self.client.get("/sessions/src/takes/t1/usage").json()
+        self.assertFalse(usage["bookmarked"])
+        self.assertEqual([item["scrapbook_id"] for item in usage["scrapbooks"]], [sid])
+
+        self.assertEqual(self.client.delete("/sessions/src/takes/t1").status_code, 200)
+
+        book = self.client.get(f"/sessions/src/scrapbooks/{sid}").json()
+        self.assertEqual(book["line_count"], 0)
+        self.assertEqual(book["lines"], [])
 
     def test_index_autoincrements_and_explicit_index_wins(self):
         with mock.patch.object(

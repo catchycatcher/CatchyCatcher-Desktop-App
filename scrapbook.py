@@ -240,9 +240,22 @@ def build_timeline(
 
 
 def extract_command(
-    vocals: str | Path, start: float, duration: float, rate: float, out: Path
+    vocals: str | Path,
+    start: float,
+    duration: float,
+    rate: float,
+    out: Path,
+    gain: float = 1.0,
 ) -> list[str]:
-    """FFmpeg command that cuts ``[start, start+duration]`` and applies ``rate``."""
+    """FFmpeg command that cuts ``[start, start+duration]``, applies ``rate``.
+
+    ``gain`` scales the level (used to match a raw recording to its
+    gain-normalised stems).
+    """
+    filters: list[str] = []
+    if gain and abs(gain - 1.0) > 1e-6:
+        filters.append(f"volume={gain:.6f}")
+    filters.append(atempo_filter(rate))
     return [
         "ffmpeg",
         "-y",
@@ -253,7 +266,7 @@ def extract_command(
         "-i",
         str(vocals),
         "-af",
-        atempo_filter(rate),
+        ",".join(filters),
         "-ac",
         str(CHANNELS),
         "-ar",
@@ -391,6 +404,21 @@ def _source(entry: dict[str, Any], backgrounds: bool) -> str | Path:
     return entry["vocals"]
 
 
+def _source_gain(entry: dict[str, Any], backgrounds: bool) -> float:
+    """Gain to apply to a line's source so levels match across takes.
+
+    The stems are already gain-normalised, so only a raw recording (used with
+    ``backgrounds``) needs the take's own gain.
+    """
+    if not backgrounds:
+        return 1.0
+    try:
+        gain = float(entry.get("gain") or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+    return gain if gain > 0 else 1.0
+
+
 def render(
     entries: list[dict[str, Any]],
     output_dir: str | Path,
@@ -430,7 +458,12 @@ def render(
         line_path = work / f"line_{index:04d}.wav"
         _run(
             extract_command(
-                _source(entry, backgrounds), float(entry["start"]), duration, speed, line_path
+                _source(entry, backgrounds),
+                float(entry["start"]),
+                duration,
+                speed,
+                line_path,
+                _source_gain(entry, backgrounds),
             )
         )
         parts.append(line_path)
@@ -450,6 +483,7 @@ def render(
                         float(gap_after),
                         speed,
                         earlier_path,
+                        _source_gain(entry, backgrounds),
                     )
                 )
                 read = _read_wav(earlier_path)
@@ -466,6 +500,7 @@ def render(
                         float(gap_before),
                         speeds[index + 1],
                         later_path,
+                        _source_gain(following, backgrounds),
                     )
                 )
                 read = _read_wav(later_path)

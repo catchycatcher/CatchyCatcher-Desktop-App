@@ -708,7 +708,7 @@ def load_vocal_mono(
     import torchaudio
 
     _require_dependencies()
-    wav, sr = _load_audio(path, sample_rate, torchaudio)
+    wav, sr, _gain = _load_audio(path, sample_rate, torchaudio)
     return wav.mean(dim=0).cpu().numpy(), sr
 
 
@@ -748,12 +748,13 @@ def _load_audio_via_ffmpeg(
         _safe_remove(temp_wav)
 
 
-def _load_audio(path: str, target_sr: int, torchaudio: Any) -> tuple[Any, int]:
+def _load_audio(path: str, target_sr: int, torchaudio: Any) -> tuple[Any, int, float]:
     """Load ``path`` as a 2-channel float tensor resampled to ``target_sr``.
 
     Demucs' ``htdemucs`` expects stereo input at ``target_sr`` (44.1 kHz), so
     mono files are duplicated and everything is resampled when necessary. The
-    result is gain-normalised (see :func:`_normalize_gain`).
+    result is gain-normalised (see :func:`_normalize_gain`) and the applied gain
+    is returned so a raw recording can be matched to the stems later.
     """
     try:
         wav, sr = torchaudio.load(path)
@@ -773,7 +774,8 @@ def _load_audio(path: str, target_sr: int, torchaudio: Any) -> tuple[Any, int]:
         wav = torchaudio.functional.resample(wav, sr, target_sr)
         sr = target_sr
 
-    return _normalize_gain(wav), sr
+    gain = _gain_factor(wav)
+    return wav * gain, sr, gain
 
 
 #: Target average level for every recording (RMS, linear ≈ -20 dBFS).
@@ -785,6 +787,14 @@ MIN_GAIN = 0.125
 SILENCE_RMS = 0.002
 
 
+def _gain_factor(wav: Any) -> float:
+    """The single gain :func:`_normalize_gain` applies to ``wav`` (1.0 if silent)."""
+    rms = float(wav.pow(2).mean().sqrt())
+    if rms < SILENCE_RMS:
+        return 1.0
+    return max(MIN_GAIN, min(MAX_GAIN, TARGET_RMS / rms))
+
+
 def _normalize_gain(wav: Any) -> Any:
     """Scale a recording by one gain so every take has a consistent average level.
 
@@ -793,11 +803,32 @@ def _normalize_gain(wav: Any) -> Any:
     matched. The gain is clamped both ways so a very quiet take is nudged rather
     than blown up (which would raise the noise floor), and silence is left as-is.
     """
-    rms = float(wav.pow(2).mean().sqrt())
+    return wav * _gain_factor(wav)
+
+
+def recording_gain(path: str) -> float:
+    """The gain :func:`_normalize_gain` would apply to a recording on disk.
+
+    Used to bring a raw recording up to the same average level as its
+    gain-normalised stems (e.g. when a scrapbook mix keeps the backgrounds).
+    Decodes to mono s16le via ffmpeg, so it needs no heavy audio stack.
+    """
+    try:
+        decoded = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", path, "-ac", "1", "-f", "s16le", "-"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return 1.0
+    samples = np.frombuffer(decoded, dtype=np.int16).astype(np.float32) / 32768.0
+    if samples.size == 0:
+        return 1.0
+    rms = float(np.sqrt(np.mean(samples**2)))
     if rms < SILENCE_RMS:
-        return wav
-    gain = max(MIN_GAIN, min(MAX_GAIN, TARGET_RMS / rms))
-    return wav * gain
+        return 1.0
+    return max(MIN_GAIN, min(MAX_GAIN, TARGET_RMS / rms))
 
 
 
@@ -928,7 +959,7 @@ def process_song_session(
     )
     sample_rate = getattr(demucs_model, "samplerate", DEFAULT_SAMPLE_RATE)
 
-    wav, sample_rate = _load_audio(input_m4a_path, sample_rate, torchaudio)
+    wav, sample_rate, input_gain = _load_audio(input_m4a_path, sample_rate, torchaudio)
 
     try:
         with torch.no_grad():
@@ -1047,6 +1078,9 @@ def process_song_session(
         "background": background_m4a,
         "bpm": take_bpm,
         "lyrics": lyrics_output,
+        # The gain applied to the raw recording before separation. The exported
+        # stems already carry it; a mix built from the raw recording needs it.
+        "gain": round(float(input_gain), 6),
     }
 
 

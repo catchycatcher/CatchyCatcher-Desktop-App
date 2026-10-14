@@ -847,6 +847,11 @@ def update_line_text(
         raise HTTPException(status_code=404, detail="Unknown line.")
 
     line = lyrics[line_index]
+    # Keep the pipeline's original detection the first time this take is edited,
+    # so it can be restored later.
+    if "original_lyrics" not in result:
+        result["original_lyrics"] = json.loads(json.dumps(lyrics))
+    result["edited"] = True
     display = text.strip()
     if display:
         if "original_words" not in line:
@@ -951,10 +956,53 @@ def replace_lyrics(
     if not new_lines:
         raise HTTPException(status_code=400, detail="No usable words in the new lines.")
 
+    if "original_lyrics" not in result:
+        result["original_lyrics"] = json.loads(json.dumps(result.get("lyrics") or []))
+    result["edited"] = True
     result["lyrics"] = new_lines
     _write_json(result_path, result)
     _touch_session(sid)
     return {"lyrics": new_lines, "bpm": result.get("bpm")}
+
+
+@app.post("/sessions/{session_id}/takes/{take_id}/lyrics/reset")
+def reset_lyrics(session_id: str, take_id: str) -> dict[str, Any]:
+    """Restore a take's lyrics to what the pipeline detected, undoing edits."""
+    sid = sanitize_id(session_id)
+    tid = sanitize_id(take_id)
+    result_path = _take_dir(sid, tid) / "result.json"
+    result = _read_json(result_path)
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=404, detail="Unknown take.")
+
+    original = result.get("original_lyrics")
+    if isinstance(original, list) and original:
+        result["lyrics"] = original
+    else:
+        # Older edits only kept per-line originals; restore those instead.
+        restored: list[Any] = []
+        changed = False
+        for line in result.get("lyrics") or []:
+            if not isinstance(line, dict):
+                restored.append(line)
+                continue
+            words = line.pop("original_words", None)
+            if words:
+                line["words"] = words
+                changed = True
+            if "text" in line:
+                line.pop("text", None)
+                changed = True
+            restored.append(line)
+        if not changed:
+            raise HTTPException(status_code=400, detail="This take has no edits to reset.")
+        result["lyrics"] = restored
+
+    result.pop("original_lyrics", None)
+    result.pop("edited", None)
+    _write_json(result_path, result)
+    _touch_session(sid)
+    return {"lyrics": result.get("lyrics") or [], "bpm": result.get("bpm")}
 
 
 @app.post("/sessions/{session_id}/takes/{take_id}/process")
@@ -1085,7 +1133,15 @@ def get_take(session_id: str, take_id: str) -> dict[str, Any]:
     meta = _read_json(take_dir / "meta.json")
     if meta is None:
         raise HTTPException(status_code=404, detail="Unknown take.")
-    return {"meta": meta, "result": _read_json(take_dir / "result.json")}
+    result = _read_json(take_dir / "result.json")
+    if isinstance(result, dict):
+        result = dict(result)
+        original = result.pop("original_lyrics", None)
+        result["edited"] = bool(original) or any(
+            isinstance(line, dict) and ("original_words" in line or "text" in line)
+            for line in (result.get("lyrics") or [])
+        )
+    return {"meta": meta, "result": result}
 
 
 @app.get("/sessions/{session_id}/takes/{take_id}/audio/{stem}")
@@ -1116,12 +1172,30 @@ def get_take_original(session_id: str, take_id: str) -> FileResponse:
 @app.delete("/sessions/{session_id}/takes/{take_id}")
 def delete_take(session_id: str, take_id: str) -> dict[str, Any]:
     """Delete a take and all of its files."""
-    take_dir = _take_dir(session_id, take_id)
+    sid = sanitize_id(session_id)
+    tid = sanitize_id(take_id)
+    take_dir = _take_dir(sid, tid)
     if not take_dir.is_dir():
         raise HTTPException(status_code=404, detail="Unknown take.")
+    # A scrapbook that holds this take's lines loses them too (even in groups).
+    _remove_take_from_scrapbooks(sid, tid)
     shutil.rmtree(take_dir)
-    _touch_session(session_id)
-    return {"deleted": True, "session_id": sanitize_id(session_id), "take_id": sanitize_id(take_id)}
+    _touch_session(sid)
+    return {"deleted": True, "session_id": sid, "take_id": tid}
+
+
+@app.get("/sessions/{session_id}/takes/{take_id}/usage")
+def take_usage(session_id: str, take_id: str) -> dict[str, Any]:
+    """Where a take is used: its bookmark and any scrapbooks holding its lines."""
+    sid = sanitize_id(session_id)
+    tid = sanitize_id(take_id)
+    meta = _read_json(_take_dir(sid, tid) / "meta.json")
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Unknown take.")
+    return {
+        "bookmarked": bool(meta.get("bookmarked", False)),
+        "scrapbooks": _scrapbook_usage(sid, tid),
+    }
 
 
 @app.post("/process-session")
@@ -1477,6 +1551,10 @@ def _scrapbook_entry(ref: dict[str, Any]) -> dict[str, Any]:
         entry["original"] = _take_input_path(take_dir, _read_json(take_dir / "meta.json"))
     except HTTPException:
         entry["original"] = vocals
+    # Newer takes store the gain applied at separation; compute it for older
+    # ones so a backgrounds mix still matches the stems' level.
+    if not isinstance(entry.get("gain"), (int, float)) or not entry.get("gain"):
+        entry["gain"] = pipeline.recording_gain(str(entry["original"]))
     entry["source"] = {"session_id": sid, "take_id": tid, "line_index": index}
     return entry
 
@@ -1505,6 +1583,85 @@ def _scrapbook_summary(meta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _ref_matches(ref: Any, sid: str, tid: str) -> bool:
+    """Whether a scrapbook line reference points at ``sid/tid``."""
+    if not isinstance(ref, dict):
+        return False
+    return sanitize_id(str(ref.get("session_id", ""))) == sid and sanitize_id(
+        str(ref.get("take_id", ""))
+    ) == tid
+
+
+def _scrapbook_usage(session_id: str, take_id: str) -> list[dict[str, Any]]:
+    """Scrapbooks in a session that hold any line from ``take_id``."""
+    sid = sanitize_id(session_id)
+    tid = sanitize_id(take_id)
+    used: list[dict[str, Any]] = []
+    scrapbooks_dir = _session_dir(sid) / "scrapbooks"
+    if not scrapbooks_dir.is_dir():
+        return used
+    for path in scrapbooks_dir.iterdir():
+        if not path.is_dir():
+            continue
+        meta = _read_json(path / "scrapbook.json")
+        if not isinstance(meta, dict):
+            continue
+        refs = [
+            ref for ref in _expand_lines(meta.get("lines") or []) if _ref_matches(ref, sid, tid)
+        ]
+        if refs:
+            used.append(
+                {
+                    "scrapbook_id": meta.get("scrapbook_id"),
+                    "name": meta.get("name"),
+                    "line_count": len(refs),
+                }
+            )
+    return used
+
+
+def _drop_take_lines(lines: Any, sid: str, tid: str) -> list[dict[str, Any]]:
+    """A scrapbook's entries with every ``sid/tid`` line removed (groups keep the rest)."""
+    out: list[dict[str, Any]] = []
+    if not isinstance(lines, list):
+        return out
+    for entry in lines:
+        if isinstance(entry, dict) and isinstance(entry.get("group"), dict):
+            inner = [ref for ref in entry.get("lines") or [] if not _ref_matches(ref, sid, tid)]
+            if inner:
+                out.append({**entry, "lines": inner})
+        elif isinstance(entry, dict):
+            if not _ref_matches(entry, sid, tid):
+                out.append(entry)
+    return out
+
+
+def _remove_take_from_scrapbooks(session_id: str, take_id: str) -> None:
+    """Drop a deleted take's lines from every scrapbook and invalidate its mix."""
+    sid = sanitize_id(session_id)
+    tid = sanitize_id(take_id)
+    scrapbooks_dir = _session_dir(sid) / "scrapbooks"
+    if not scrapbooks_dir.is_dir():
+        return
+    for path in scrapbooks_dir.iterdir():
+        if not path.is_dir():
+            continue
+        meta_path = path / "scrapbook.json"
+        meta = _read_json(meta_path)
+        if not isinstance(meta, dict):
+            continue
+        lines = meta.get("lines") or []
+        filtered = _drop_take_lines(lines, sid, tid)
+        if filtered == lines:
+            continue
+        meta["lines"] = filtered
+        meta["render"] = None
+        meta["updated_at"] = _now()
+        _write_json(meta_path, meta)
+        for name in ("mix.m4a", "mix_bg.m4a"):
+            (path / name).unlink(missing_ok=True)
+
+
 def _line_data(ref: dict[str, Any]) -> dict[str, Any]:
     """Resolve one scrapbook line reference into what the renderer needs."""
     sid = sanitize_id(str(ref.get("session_id", "")))
@@ -1525,6 +1682,7 @@ def _line_data(ref: dict[str, Any]) -> dict[str, Any]:
     previous = lyrics[index - 1] if index > 0 else None
     following = lyrics[index + 1] if index + 1 < len(lyrics) else None
     take_bpm = result.get("bpm") if isinstance(result, dict) else None
+    raw_gain = result.get("gain") if isinstance(result, dict) else None
     return {
         "bpm": float(line.get("bpm") or 120.0),
         "text": line.get("text"),
@@ -1540,6 +1698,7 @@ def _line_data(ref: dict[str, Any]) -> dict[str, Any]:
         "gap_after": (
             float(following["start time"]) - float(line["end time"]) if following else None
         ),
+        "gain": float(raw_gain) if raw_gain else None,
         "vocals": vocals,
     }
 
