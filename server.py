@@ -1536,7 +1536,9 @@ def _expand_lines(lines: Any) -> list[dict[str, Any]]:
     return expanded
 
 
-def _scrapbook_entry(ref: dict[str, Any]) -> dict[str, Any]:
+def _scrapbook_entry(
+    ref: dict[str, Any], gain_cache: dict[str, float] | None = None
+) -> dict[str, Any]:
     """A scrapbook line's snapshot (or live data) plus its audio paths."""
     sid = sanitize_id(str(ref.get("session_id", "")))
     tid = sanitize_id(str(ref.get("take_id", "")))
@@ -1558,9 +1560,15 @@ def _scrapbook_entry(ref: dict[str, Any]) -> dict[str, Any]:
     except HTTPException:
         entry["original"] = vocals
     # Newer takes store the gain applied at separation; compute it for older
-    # ones so a backgrounds mix still matches the stems' level.
+    # ones so a backgrounds mix still matches the stems' level (once per take).
     if not isinstance(entry.get("gain"), (int, float)) or not entry.get("gain"):
-        entry["gain"] = pipeline.recording_gain(str(entry["original"]))
+        key = str(entry["original"])
+        if gain_cache is not None and key in gain_cache:
+            entry["gain"] = gain_cache[key]
+        else:
+            entry["gain"] = pipeline.recording_gain(key)
+            if gain_cache is not None:
+                gain_cache[key] = entry["gain"]
     entry["source"] = {"session_id": sid, "take_id": tid, "line_index": index}
     return entry
 
@@ -1745,7 +1753,8 @@ def _render_scrapbook(
     if not expanded:
         raise HTTPException(status_code=400, detail="Add at least one line before rendering.")
 
-    entries = [_scrapbook_entry(ref) for ref in expanded]
+    gain_cache: dict[str, float] = {}
+    entries = [_scrapbook_entry(ref, gain_cache) for ref in expanded]
     with PROCESS_LOCK:
         timeline, gaps, _mix = scrapbook.render(entries, book_dir, backgrounds=backgrounds)
 
