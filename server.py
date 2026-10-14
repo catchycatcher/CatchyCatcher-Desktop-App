@@ -692,14 +692,6 @@ def _syllables(token: str) -> int:
     return max(1, count)
 
 
-def _nearest_at_least(positions: list[float], target: float, minimum: float) -> float:
-    """The grid line closest to ``target`` that is at least ``minimum``."""
-    choices = [position for position in positions if position >= minimum - 1e-9]
-    if not choices:
-        return max(minimum, target)
-    return min(choices, key=lambda position: abs(position - target))
-
-
 def _retime_words(
     original_words: list[dict[str, Any]],
     new_text: str,
@@ -783,31 +775,36 @@ def _retime_words(
             cursor += share
         index = end
 
-    # Nudge the guessed word boundaries onto the metrical grid — BOTH ends, so a
-    # word starts and finishes on grid lines rather than starting on one and
-    # ending anywhere. Anchors keep their original times exactly.
+    # Nudge guessed word boundaries onto the metrical grid, so each syllable has
+    # a sensible place. Anchors keep their original times exactly.
     if bpm > 0:
-        positions = tempo.grid_positions(line_start, line_end, bpm, phase)
-        if positions:
-            adjusted: list[tuple[float, float] | None] = list(times)
-            previous_end = line_start
-            for position in range(len(tokens)):
-                bounds = times[position]
-                if bounds is None:
-                    continue
-                start, finish = bounds
-                if anchors[position]:
-                    adjusted[position] = (start, finish)
-                    previous_end = finish
-                    continue
-                lower = max(previous_end, line_start)
-                snapped_start = _nearest_at_least(positions, start, lower)
-                snapped_end = _nearest_at_least(positions, finish, snapped_start + 1e-4)
-                if snapped_end <= snapped_start:
-                    snapped_end = snapped_start + max(0.01, finish - start)
-                adjusted[position] = (snapped_start, snapped_end)
-                previous_end = snapped_end
-            times = adjusted
+        snapped = list(times)
+        for position in range(len(tokens)):
+            bounds = times[position]
+            if bounds is None or anchors[position]:
+                continue
+            start, finish = bounds
+            target = tempo.snap_time(start, bpm, phase)
+            lower = times[position - 1][0] + 0.005 if position > 0 and times[position - 1] else line_start
+            upper = (
+                times[position + 1][0]
+                if position + 1 < len(tokens) and times[position + 1]
+                else line_end
+            )
+            target = max(lower, min(upper - 0.005, target))
+            snapped[position] = (target, finish)
+        # Keep every word inside its neighbour's start (words stay in order).
+        for position in range(len(tokens)):
+            if anchors[position] or snapped[position] is None:
+                continue
+            start, finish = snapped[position]
+            upper = (
+                snapped[position + 1][0]
+                if position + 1 < len(tokens) and snapped[position + 1]
+                else line_end
+            )
+            snapped[position] = (start, max(start, min(finish, upper)))
+        times = snapped
 
     result: list[dict[str, Any]] = []
     for token, bounds in zip(tokens, times):
