@@ -693,6 +693,103 @@ def _grid_bpm(words: list[dict[str, Any]]) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Wordless-stretch annotations
+# ---------------------------------------------------------------------------
+
+#: A stretch with no detected words longer than this gets a marker line.
+ANNOTATION_MIN_SECONDS = 4.0
+#: A stem counts as sounding in a stretch when its RMS there is at least this
+#: fraction of its own reference level...
+ANNOTATION_ACTIVE_RATIO = 0.2
+#: ...and at least this absolute level (the stems are gain-normalised).
+ANNOTATION_MIN_RMS = 0.004
+#: Markers for a stretch with backing music, and with wordless vocals.
+MUSIC_MARKER = "---"
+VOCAL_MARKER = "~~~"
+
+
+def _rms_between(signal: Any, start: float, end: float, sample_rate: int) -> float:
+    """RMS of ``signal`` (mono) between ``start`` and ``end`` seconds."""
+    first = max(0, int(start * sample_rate))
+    last = min(int(signal.shape[0]), int(end * sample_rate))
+    if last <= first:
+        return 0.0
+    segment = signal[first:last]
+    return float(np.sqrt(np.mean(segment**2)))
+
+
+def _annotate_wordless_stretches(
+    lyrics: list[dict[str, Any]],
+    vocals: Any,
+    background: Any,
+    sample_rate: int,
+    duration: float,
+    bpm: float,
+) -> list[dict[str, Any]]:
+    """Marker lines for long stretches that have no words.
+
+    A stretch longer than :data:`ANNOTATION_MIN_SECONDS` between lyric lines (or
+    before/after them) is annotated: ``"~~~"`` when the isolated vocal is still
+    sounding (humming, oohs), otherwise ``"---"`` when the backing is playing.
+    Stretches that are effectively silent are left alone.
+    """
+    if duration <= 0:
+        return []
+
+    def reference(signal: Any, spans: list[tuple[float, float]]) -> float:
+        parts = [
+            signal[max(0, int(a * sample_rate)) : int(b * sample_rate)] for a, b in spans
+        ]
+        parts = [part for part in parts if part.size]
+        if not parts:
+            return 0.0
+        return float(np.sqrt(np.mean(np.concatenate(parts) ** 2)))
+
+    sung = [(float(line["start time"]), float(line["end time"])) for line in lyrics]
+    vocals_ref = reference(vocals, sung) if sung else float(np.sqrt(np.mean(vocals**2)))
+    background_ref = float(np.sqrt(np.mean(background**2)))
+
+    vocal_floor = max(ANNOTATION_MIN_RMS, ANNOTATION_ACTIVE_RATIO * vocals_ref)
+    music_floor = max(ANNOTATION_MIN_RMS, ANNOTATION_ACTIVE_RATIO * background_ref)
+
+    gaps: list[tuple[float, float]] = []
+    cursor = 0.0
+    for line in lyrics:
+        gaps.append((cursor, float(line["start time"])))
+        cursor = max(cursor, float(line["end time"]))
+    gaps.append((cursor, duration))
+
+    markers: list[dict[str, Any]] = []
+    for start, end in gaps:
+        if end - start < ANNOTATION_MIN_SECONDS:
+            continue
+        vocals_level = _rms_between(vocals, start, end, sample_rate)
+        music_level = _rms_between(background, start, end, sample_rate)
+        if vocals_level > vocal_floor:
+            marker = VOCAL_MARKER
+        elif music_level > music_floor:
+            marker = MUSIC_MARKER
+        else:
+            continue
+        markers.append(
+            {
+                "bpm": bpm,
+                "start time": round(start, 3),
+                "end time": round(end, 3),
+                "words": [
+                    {
+                        "word": marker,
+                        "start": round(start, 3),
+                        "end": round(end, 3),
+                        "length": round(end - start, 3),
+                    }
+                ],
+            }
+        )
+    return markers
+
+
+# ---------------------------------------------------------------------------
 # Audio helpers
 # ---------------------------------------------------------------------------
 
@@ -1075,6 +1172,19 @@ def process_song_session(
                     for w in line_words
                 ],
             }
+        )
+
+    # ------------------------------------------------------------------
+    # 5. Mark long wordless stretches (instrumental / wordless vocals)
+    # ------------------------------------------------------------------
+    background_np = background_tensor.mean(dim=0).cpu().numpy()
+    duration = float(vocal_np.shape[0]) / sample_rate if sample_rate else 0.0
+    annotations = _annotate_wordless_stretches(
+        lyrics_output, vocal_np, background_np, sample_rate, duration, take_bpm
+    )
+    if annotations:
+        lyrics_output = sorted(
+            lyrics_output + annotations, key=lambda line: line["start time"]
         )
 
     return {

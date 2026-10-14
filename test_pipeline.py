@@ -938,6 +938,57 @@ class TempoGridTests(unittest.TestCase):
         self.assertEqual(tempo.fit_grid([1.0])[0], 0.0)
 
 
+class AnnotationTests(unittest.TestCase):
+    """Marker lines for long stretches with no words."""
+
+    RATE = 100
+
+    def _markers(self, lyrics, vocals, background, duration=10.0, bpm=120.0):
+        return pipeline._annotate_wordless_stretches(
+            lyrics,
+            np.asarray(vocals, dtype=np.float32),
+            np.asarray(background, dtype=np.float32),
+            self.RATE,
+            duration,
+            bpm,
+        )
+
+    def test_music_only_stretch_is_marked_with_dashes(self):
+        # 10s, no vocals, a steady backing track.
+        vocals = np.zeros(self.RATE * 10, dtype=np.float32)
+        background = np.full(self.RATE * 10, 0.05, dtype=np.float32)
+        markers = self._markers([], vocals, background)
+        self.assertEqual([line["words"][0]["word"] for line in markers], ["---"])
+        self.assertEqual(markers[0]["start time"], 0.0)
+        self.assertEqual(markers[0]["end time"], 10.0)
+
+    def test_wordless_vocals_are_marked_with_tildes(self):
+        vocals = np.full(self.RATE * 10, 0.05, dtype=np.float32)
+        background = np.full(self.RATE * 10, 0.02, dtype=np.float32)
+        markers = self._markers([], vocals, background)
+        self.assertEqual([line["words"][0]["word"] for line in markers], ["~~~"])
+
+    def test_silence_is_left_alone(self):
+        silence = np.zeros(self.RATE * 10, dtype=np.float32)
+        self.assertEqual(self._markers([], silence, silence), [])
+
+    def test_short_gap_is_left_alone(self):
+        vocals = np.full(self.RATE * 3, 0.05, dtype=np.float32)
+        background = np.full(self.RATE * 3, 0.05, dtype=np.float32)
+        self.assertEqual(self._markers([], vocals, background, duration=3.0), [])
+
+    def test_only_the_gap_between_lines_is_marked(self):
+        # A sung line at 1-3s, then a long instrumental from 3s.
+        lyrics = [{"bpm": 120.0, "start time": 1.0, "end time": 3.0, "words": []}]
+        vocals = np.zeros(self.RATE * 12, dtype=np.float32)
+        vocals[self.RATE * 1 : self.RATE * 3] = 0.05  # sung region
+        background = np.full(self.RATE * 12, 0.05, dtype=np.float32)
+        markers = self._markers(lyrics, vocals, background, duration=12.0)
+        self.assertEqual([line["words"][0]["word"] for line in markers], ["---"])
+        self.assertEqual(markers[0]["start time"], 3.0)
+        self.assertEqual(markers[0]["end time"], 12.0)
+
+
 class ApiTests(unittest.TestCase):
     """HTTP-level tests for session/take organisation, with the pipeline stubbed."""
 
