@@ -1,17 +1,15 @@
 """Scrapbook rendering: stitch isolated vocal lines into one tempo-matched mix.
 
-A scrapbook is an ordered list of *lines* referenced from processed takes. There
-is no single BPM: each line keeps its own recorded tempo, and only the *relative*
-tempo between neighbouring lines is adjusted.
+A scrapbook is an ordered list of *lines* referenced from processed takes. The
+mix has one absolute tempo, always auto-calculated as the median of the clips'
+tempos. Each clip is then played at whichever **simple ratio** of that tempo is
+closest to its own recorded tempo (1, 3/2, 2/3, 1/2, …), so a half/double-time
+clip keeps its own time instead of being stretched to match the mix exactly, and
+a clip that is close to the mix tempo is stretched only a little.
 
-For each line we know two expected ratios from its own journal — how its tempo
-related to the line that followed it (``after``) and to the line that preceded it
-(``before``) — and the tempo of the whole take it came from. When line B is
-placed after line A, the *baseline* is the ratio of their source takes' tempos,
-and the ratio applied to B is whichever of ``after``, ``before`` or **same BPM as
-A** sits closest to that baseline. Once every line has a speed, they are
-normalised so the median log-speed is zero — so half the lines speed up and half
-slow down, with no overall shift.
+The gap between two lines is filled with the audio that actually followed and
+preceded them in their own recordings (their ``gap_after`` / ``gap_before``
+stretches), cross-faded together.
 
 The module is deliberately free of FastAPI/state: callers pass in the resolved
 line data and the output directory, which keeps the maths unit-testable without
@@ -88,76 +86,45 @@ def _source_words(entry: dict[str, Any], line_start: float) -> list[tuple[str, f
     return resolved
 
 
-#: Ratios that are musically meaningful. A chosen ratio close to one of these
-#: is snapped to it, so the mix prefers a clean relationship over an arbitrary
-#: (and possibly large) stretch.
-SIMPLE_RATIOS = (0.5, 2.0 / 3.0, 0.75, 0.8, 1.0, 1.25, 4.0 / 3.0, 1.5, 2.0)
-#: How close (multiplicatively) a ratio must be to snap to a simple one.
-RATIO_TOLERANCE = 0.04
+#: Simple ratios a clip's tempo may take relative to the mix's absolute tempo.
+#: Choosing the nearest means a half/double-time clip plays in its own time
+#: instead of being stretched to hit the mix tempo exactly.
+MIX_RATIOS = (0.5, 2.0 / 3.0, 0.75, 0.8, 1.0, 1.25, 4.0 / 3.0, 1.5, 2.0)
+
+#: Fallback tempo when a clip has none.
+DEFAULT_MIX_BPM = 120.0
 
 
-def _snap_ratio(ratio: float) -> float:
-    """Snap ``ratio`` to the nearest musically simple ratio when it is close."""
-    nearest = min(SIMPLE_RATIOS, key=lambda simple: abs(math.log(simple) - math.log(ratio)))
-    if abs(math.log(nearest) - math.log(ratio)) <= math.log(1.0 + RATIO_TOLERANCE):
-        return nearest
-    return ratio
+def mix_bpm(entries: list[dict[str, Any]]) -> float:
+    """The scrapbook's one absolute tempo: the median of its clips' tempos."""
+    tempos = [
+        float(entry.get("bpm") or entry.get("take_bpm") or DEFAULT_MIX_BPM) for entry in entries
+    ]
+    value = _median(tempos) if tempos else DEFAULT_MIX_BPM
+    return value if value > 0 else DEFAULT_MIX_BPM
 
 
 def _line_speeds(entries: list[dict[str, Any]]) -> list[float]:
-    """Per-line playback speed factors (1.0 = played at its recorded tempo).
+    """Per-line playback speed so every clip plays at a ratio of the mix tempo.
 
-    The *baseline* for a pair of neighbours is the ratio of the tempos of the
-    takes they were sourced from (so two clips from the same-tempo takes are
-    expected to line up), rather than a scale of 1. The candidate ratios are the
-    previous line's ``after`` expectation, this line's ``before`` expectation,
-    and **same BPM as the previous line** (always available); the one closest to
-    the baseline wins, and it is snapped to a musically simple ratio when close
-    so a fitting relationship beats a large arbitrary stretch.
-
-    ``speed > 1`` plays the line faster (shorter); the median log-speed is
-    normalised to zero so there is no overall tempo shift.
+    The mix has one absolute tempo (the median clip tempo, always auto). Each
+    clip is played at whichever **simple ratio** of that tempo is closest to its
+    own recorded tempo, so a half/double-time clip stays in its own time (ratio
+    1/2 or 2) rather than being stretched to match the mix exactly. The speed is
+    ``ratio * mix_bpm / clip_bpm``.
     """
+    if not entries:
+        return []
+    reference = mix_bpm(entries)
     speeds: list[float] = []
-    played: float | None = None
-    previous_take_bpm: float | None = None
-
-    for index, entry in enumerate(entries):
-        bpm = float(entry.get("bpm") or 120.0)
-        take_bpm = float(entry.get("take_bpm") or bpm)
-
-        if played is None:
+    for entry in entries:
+        bpm = float(entry.get("bpm") or entry.get("take_bpm") or DEFAULT_MIX_BPM)
+        if bpm <= 0:
             speeds.append(1.0)
-            played = bpm
-            previous_take_bpm = take_bpm
             continue
-
-        # Baseline: how the two source takes relate in tempo.
-        if previous_take_bpm:
-            baseline = take_bpm / previous_take_bpm
-        else:
-            baseline = bpm / played
-
-        # Same-BPM is always an option; the neighbours' expectations add more.
-        candidates = [1.0]
-        after = entries[index - 1].get("after")
-        before = entry.get("before")
-        if after:
-            candidates.append(float(after))
-        if before:
-            candidates.append(float(before))
-
-        chosen = min(candidates, key=lambda ratio: abs(math.log(ratio) - math.log(baseline)))
-        chosen = _snap_ratio(chosen)
-        played = played * chosen
-        speeds.append(played / bpm)
-        previous_take_bpm = take_bpm
-
-    if speeds:
-        logs = [math.log(speed) for speed in speeds]
-        shift = _median(logs)
-        speeds = [math.exp(value - shift) for value in logs]
-
+        natural = bpm / reference
+        ratio = min(MIX_RATIOS, key=lambda value: abs(math.log(value) - math.log(natural)))
+        speeds.append((ratio * reference) / bpm)
     return [max(MIN_SPEED, min(MAX_SPEED, speed)) for speed in speeds]
 
 

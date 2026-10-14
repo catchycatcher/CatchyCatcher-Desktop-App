@@ -685,64 +685,37 @@ class ScrapbookTimelineTests(unittest.TestCase):
             product *= factor
         self.assertAlmostEqual(product, 1.7, places=5)
 
-    def test_matching_journals_need_no_stretch(self):
+    def test_mix_tempo_is_the_median_and_clips_snap_to_a_ratio(self):
+        # 100 and 120 around a 110 mix: each snaps to ratio 1 of the mix, so a
+        # small stretch lands them both on 110.
         entries = [
-            {"bpm": 100.0, "start": 0.0, "end": 1.0, "words": [], "next_bpm": 120.0},
-            {"bpm": 120.0, "start": 0.0, "end": 1.0, "words": [], "prev_bpm": 100.0},
+            {"bpm": 100.0, "start": 0.0, "end": 1.0, "words": []},
+            {"bpm": 120.0, "start": 0.0, "end": 1.0, "words": []},
         ]
-        timeline, gaps = scrapbook.build_timeline(entries)
-        # A's after-ratio and B's before-ratio both say 1.2, matching B's
-        # natural ratio, so neither line is stretched.
-        self.assertAlmostEqual(timeline[0]["speed"], 1.0, places=3)
-        self.assertAlmostEqual(timeline[1]["speed"], 1.0, places=3)
-        self.assertAlmostEqual(timeline[0]["end time"], 1.0, places=3)
-        self.assertAlmostEqual(gaps[0], scrapbook.DEFAULT_GAP_SECONDS, places=3)
-        self.assertAlmostEqual(timeline[1]["start time"], 1.0 + gaps[0], places=3)
-
-    def test_chooses_the_ratio_closest_to_natural(self):
-        entries = [
-            {"bpm": 100.0, "start": 0.0, "end": 1.0, "words": [], "next_bpm": 150.0},
-            {"bpm": 120.0, "start": 0.0, "end": 1.0, "words": [], "prev_bpm": 110.0},
-        ]
-        # natural = 120/100 = 1.2; candidates are A.after=1.5 and B.before=1.0909.
-        # 1.0909 is closer to 1.2, so B slows slightly: raw speed 0.909.
+        self.assertAlmostEqual(scrapbook.mix_bpm(entries), 110.0, places=3)
         timeline, _gaps = scrapbook.build_timeline(entries)
-        # Median log-speed is normalised to zero, so the two speeds mirror.
-        self.assertAlmostEqual(timeline[0]["speed"], 1.049, places=2)
-        self.assertAlmostEqual(timeline[1]["speed"], 0.953, places=2)
+        self.assertAlmostEqual(timeline[0]["speed"] * 100.0, 110.0, delta=0.5)
+        self.assertAlmostEqual(timeline[1]["speed"] * 120.0, 110.0, delta=0.5)
 
-    def test_median_log_speed_is_zero(self):
+    def test_half_time_clip_is_not_stretched(self):
+        # A clip at 60 against a 120 mix is half-time: it keeps ratio 1/2 and
+        # plays un-stretched rather than being pulled up to 120.
         entries = [
-            {"bpm": 100.0, "start": 0.0, "end": 1.0, "words": [], "next_bpm": 130.0},
-            {"bpm": 130.0, "start": 0.0, "end": 1.0, "words": [], "prev_bpm": 100.0, "next_bpm": 80.0},
-            {"bpm": 80.0, "start": 0.0, "end": 1.0, "words": [], "prev_bpm": 130.0},
+            {"bpm": 120.0, "start": 0.0, "end": 1.0, "words": []},
+            {"bpm": 120.0, "start": 0.0, "end": 1.0, "words": []},
+            {"bpm": 60.0, "start": 0.0, "end": 1.0, "words": []},
         ]
         timeline, _gaps = scrapbook.build_timeline(entries)
-        logs = sorted(math.log(line["speed"]) for line in timeline)
-        self.assertAlmostEqual(logs[len(logs) // 2], 0.0, places=3)
+        self.assertEqual(timeline[2]["speed"], 1.0)
+        self.assertAlmostEqual(timeline[2]["bpm"], 60.0, places=1)
 
-    def test_same_bpm_is_always_an_option(self):
-        # Two takes at very different tempos, no neighbour info: the take-ratio
-        # baseline is 1.6, but same-BPM (1.0) is still a candidate and wins as
-        # the only option, so B is played at A's tempo.
+    def test_reasonably_close_clip_is_barely_stretched(self):
         entries = [
-            {"bpm": 100.0, "take_bpm": 100.0, "start": 0.0, "end": 1.0, "words": []},
-            {"bpm": 160.0, "take_bpm": 160.0, "start": 0.0, "end": 1.0, "words": []},
+            {"bpm": 120.0, "start": 0.0, "end": 1.0, "words": []},
+            {"bpm": 125.0, "start": 0.0, "end": 1.0, "words": []},
         ]
         timeline, _gaps = scrapbook.build_timeline(entries)
-        self.assertAlmostEqual(timeline[0]["speed"], 1.265, places=2)
-        self.assertAlmostEqual(timeline[1]["speed"], 0.790, places=2)
-
-    def test_baseline_prefers_the_source_take_ratio(self):
-        # A's take is 100, B's take is 160 -> baseline 1.6. A's after-ratio of
-        # 2.0 is closer to 1.6 than same-BPM (1.0), so the expectation is used.
-        entries = [
-            {"bpm": 100.0, "take_bpm": 100.0, "next_bpm": 200.0, "start": 0.0, "end": 1.0, "words": []},
-            {"bpm": 160.0, "take_bpm": 160.0, "start": 0.0, "end": 1.0, "words": []},
-        ]
-        timeline, _gaps = scrapbook.build_timeline(entries)
-        self.assertAlmostEqual(timeline[0]["speed"], 0.89, places=2)
-        self.assertAlmostEqual(timeline[1]["speed"], 1.12, places=2)
+        self.assertLess(abs(timeline[1]["speed"] - 1.0), 0.05)
 
     def test_single_line_plays_at_its_tempo(self):
         entries = [{"bpm": 90.0, "start": 1.0, "end": 2.0, "words": []}]
