@@ -642,8 +642,9 @@ class ProcessSongSessionFlowTests(unittest.TestCase):
             ],
         )
 
-        # Two stems exported, plus scratch WAVs are cleaned up.
-        self.assertEqual(run.call_count, 2)
+        # Three exports (vocals, background, gain-normalised full); scratch WAVs
+        # are cleaned up.
+        self.assertEqual(run.call_count, 3)
         leftovers = [f for f in os.listdir(self.temp_dir) if f.endswith(".wav")]
         self.assertEqual(leftovers, [])
 
@@ -955,6 +956,7 @@ class ApiTests(unittest.TestCase):
         def fake(input_path, output_dir="./output", *, silence_threshold=0.4):
             Path(output_dir, "vocals.m4a").write_bytes(b"VOCALS")
             Path(output_dir, "background.m4a").write_bytes(b"BACKGROUND")
+            Path(output_dir, "full.m4a").write_bytes(b"FULL")
             result = {
                 "vocals": str(Path(output_dir, "vocals.m4a")),
                 "background": str(Path(output_dir, "background.m4a")),
@@ -1260,6 +1262,10 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(
             self.client.get("/sessions/journal/takes/entry1").json()["meta"]["status"],
             "done",
+        )
+        # Playback then serves the gain-normalised copy, not the raw upload.
+        self.assertEqual(
+            self.client.get("/sessions/journal/takes/entry1/original").content, b"FULL"
         )
 
     def test_upload_is_processed_by_default(self):

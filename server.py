@@ -1160,11 +1160,18 @@ def get_take_audio(session_id: str, take_id: str, stem: str) -> FileResponse:
 
 @app.get("/sessions/{session_id}/takes/{take_id}/original")
 def get_take_original(session_id: str, take_id: str) -> FileResponse:
-    """Stream the raw recording of a take, processed or not."""
+    """Stream a take's recording: gain-normalised once processed, raw before then.
+
+    Playback should match the level of the processed stems, so the
+    gain-normalised copy the pipeline exports is served once it exists.
+    """
     take_dir = _take_dir(session_id, take_id)
     meta = _read_json(take_dir / "meta.json")
     if meta is None:
         raise HTTPException(status_code=404, detail="Unknown take.")
+    normalized = take_dir / "full.m4a"
+    if normalized.is_file():
+        return FileResponse(normalized, media_type="audio/mp4", filename=normalized.name)
     path = _take_input_path(take_dir, meta)
     return FileResponse(path, filename=path.name)
 

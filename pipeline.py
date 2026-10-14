@@ -980,8 +980,12 @@ def process_song_session(
 
     vocals_m4a = os.path.join(output_dir, "vocals.m4a")
     background_m4a = os.path.join(output_dir, "background.m4a")
+    full_m4a = os.path.join(output_dir, "full.m4a")
     _export_m4a(vocals_tensor, sample_rate, vocals_m4a, torchaudio)
     _export_m4a(background_tensor, sample_rate, background_m4a, torchaudio)
+    # The gain-normalised input (before separation), so playing back the raw
+    # recording matches the stems' level. Not returned: it is a playback aid.
+    _export_m4a(wav, sample_rate, full_m4a, torchaudio)
 
     # The stem tensors are no longer needed.
     del sources
