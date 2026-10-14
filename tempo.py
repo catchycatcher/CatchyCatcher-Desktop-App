@@ -9,8 +9,8 @@ least, then triplets, then sixteenths — so the fit prefers words on the beat
 and only calls something an eighth/sixteenth/triplet when the timing really
 says so.
 
-The same grid then places the syllables of a word (so an edited line always has
-"a good place" for every syllable) and re-times lyric edits.
+The same grid then places the syllables of a word and re-times lyric edits, so
+an edited line always has "a good place" for every syllable.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ _PHASE_STEPS = 48
 
 
 def _beat_cost(times: "np.ndarray", period: float, phase: float, subdivisions) -> float:
-    """Mean distance (in beats², plus subdivision penalty) to the nearest line."""
+    """Mean cost of the words: distance² (in beats) plus the subdivision penalty."""
     best: "np.ndarray | None" = None
     for offset, penalty in subdivisions:
         index = np.round((times - phase) / period - offset)
@@ -101,20 +101,31 @@ def fit_grid(
 
 
 def snap_time(time: float, bpm: float, phase: float, subdivisions=SUBDIVISIONS) -> float:
-    """The nearest allowed grid position to ``time`` (unchanged if no grid)."""
+    """The nearest grid line, preferring the beat over weaker subdivisions.
+
+    Uses the same cost as the fit (``penalty + distance²``), so a word is only
+    read as an eighth/triplet/sixteenth when it is clearly closer to one than to
+    the main beat.
+    """
     if bpm <= 0:
         return time
     period = 60.0 / bpm
     best = None
-    for offset, _penalty in subdivisions:
+    best_cost = None
+    for offset, penalty in subdivisions:
         index = round((time - phase) / period - offset)
         position = phase + (index + offset) * period
-        if best is None or abs(time - position) < abs(time - best):
-            best = position
+        gap = (time - position) / period
+        cost = penalty + gap * gap
+        if best_cost is None or cost < best_cost:
+            best_cost, best = cost, position
     return best if best is not None else time
 
 
-def _grid_positions(start: float, end: float, bpm: float, phase: float, subdivisions) -> list[float]:
+def grid_positions(
+    start: float, end: float, bpm: float, phase: float, subdivisions=SUBDIVISIONS
+) -> list[float]:
+    """Every allowed grid line in ``[start, end]``, sorted."""
     if bpm <= 0 or end <= start:
         return []
     period = 60.0 / bpm
@@ -152,7 +163,7 @@ def predict_syllables(
         return [start + (end - start) * (i / count) for i in range(count)]
 
     ideal = [start + (end - start) * (i / count) for i in range(count)]
-    positions = _grid_positions(start, end, bpm, phase, subdivisions)
+    positions = grid_positions(start, end, bpm, phase, subdivisions)
     if len(positions) < count:
         return ideal
 
