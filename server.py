@@ -1379,6 +1379,12 @@ def replace_scribble_lyrics(
     return replace_lyrics(SCRIBBLES_SESSION_ID, scribble_id, body)
 
 
+@app.post("/scribbles/{scribble_id}/lyrics/reset")
+def reset_scribble_lyrics(scribble_id: str) -> dict[str, Any]:
+    """Restore a scribble's lyrics to the pipeline's original detection."""
+    return reset_lyrics(SCRIBBLES_SESSION_ID, scribble_id)
+
+
 @app.get("/scribbles/{scribble_id}/audio/{stem}")
 def get_scribble_audio(scribble_id: str, stem: str) -> FileResponse:
     """Stream a scribble's generated stem (``vocals`` or ``background``)."""

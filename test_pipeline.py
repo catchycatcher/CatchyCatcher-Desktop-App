@@ -1624,6 +1624,20 @@ class ScribbleApiTests(unittest.TestCase):
         self.assertEqual([item["take_id"] for item in listed], ["idea1"])
         self.assertEqual(listed[0]["name"], "Idea One")
 
+    def test_scribble_line_edits_can_be_reset(self):
+        with mock.patch.object(
+            server.pipeline, "process_song_session", side_effect=self._fake_process([])
+        ):
+            self.client.post("/scribbles/s1", files={"file": ("s1.m4a", b"x", "audio/mp4")})
+
+        edited = self.client.patch("/scribbles/s1/lines/0", params={"text": "bye now"})
+        self.assertEqual(edited.status_code, 200, edited.text)
+        self.assertTrue(self.client.get("/scribbles/s1").json()["result"]["edited"])
+
+        reset = self.client.post("/scribbles/s1/lyrics/reset")
+        self.assertEqual(reset.status_code, 200, reset.text)
+        self.assertEqual([word["word"] for word in reset.json()["lyrics"][0]["words"]], ["hi"])
+
     def test_scribble_lifecycle(self):
         stored = self.client.post(
             "/scribbles/raw1",
