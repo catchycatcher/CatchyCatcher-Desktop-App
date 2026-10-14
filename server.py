@@ -1457,11 +1457,12 @@ def _expand_lines(lines: Any) -> list[dict[str, Any]]:
 
 
 def _scrapbook_entry(ref: dict[str, Any]) -> dict[str, Any]:
-    """A scrapbook line's snapshot (or live data) plus its vocals path."""
+    """A scrapbook line's snapshot (or live data) plus its audio paths."""
     sid = sanitize_id(str(ref.get("session_id", "")))
     tid = sanitize_id(str(ref.get("take_id", "")))
     index = int(ref.get("line_index", 0))
-    vocals = _take_dir(sid, tid) / "vocals.m4a"
+    take_dir = _take_dir(sid, tid)
+    vocals = take_dir / "vocals.m4a"
     if not vocals.is_file():
         raise HTTPException(status_code=400, detail=f"No isolated vocals for {sid}/{tid}.")
 
@@ -1470,6 +1471,12 @@ def _scrapbook_entry(ref: dict[str, Any]) -> dict[str, Any]:
         data = _line_data({"session_id": sid, "take_id": tid, "line_index": index})
     entry = {key: value for key, value in data.items() if key != "vocals"}
     entry["vocals"] = vocals
+    # The raw recording, used when a mix includes backgrounds; fall back to the
+    # vocals if this take has no stored input for some reason.
+    try:
+        entry["original"] = _take_input_path(take_dir, _read_json(take_dir / "meta.json"))
+    except HTTPException:
+        entry["original"] = vocals
     entry["source"] = {"session_id": sid, "take_id": tid, "line_index": index}
     return entry
 
@@ -1537,31 +1544,62 @@ def _line_data(ref: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _render_scrapbook(session_id: str, meta: dict[str, Any]) -> dict[str, Any]:
+def _scrapbook_mix_path(book_dir: Path, backgrounds: bool) -> Path:
+    return book_dir / scrapbook.mix_filename(backgrounds)
+
+
+def _render_scrapbook(
+    session_id: str, meta: dict[str, Any], backgrounds: bool = False
+) -> dict[str, Any]:
     sid = str(meta["scrapbook_id"])
     lines = meta.get("lines") or []
     expanded = _expand_lines(lines)
     signature = _scrapbook_signature(lines)
     book_dir = _scrapbook_dir(session_id, sid)
-    mix = book_dir / "mix.m4a"
+    mode = "backgrounds" if backgrounds else "vocals"
 
-    cached = meta.get("render")
-    if isinstance(cached, dict) and cached.get("signature") == signature and mix.is_file():
-        return cached
+    render = meta.get("render")
+    if not isinstance(render, dict):
+        render = {}
+    variants = render.get("variants")
+    if not isinstance(variants, dict):
+        variants = {}
+
+    def ready(name: str) -> bool:
+        info = variants.get(name)
+        return bool(
+            isinstance(info, dict)
+            and info.get("signature") == signature
+            and _scrapbook_mix_path(book_dir, name == "backgrounds").is_file()
+        )
+
+    # This variant of the current lines is already rendered.
+    if ready(mode):
+        return render
 
     if not expanded:
         raise HTTPException(status_code=400, detail="Add at least one line before rendering.")
 
     entries = [_scrapbook_entry(ref) for ref in expanded]
     with PROCESS_LOCK:
-        timeline, gaps, _mix = scrapbook.render(entries, book_dir)
+        timeline, gaps, _mix = scrapbook.render(entries, book_dir, backgrounds=backgrounds)
+
+    now = _now()
+    variants[mode] = {"signature": signature, "rendered_at": now}
+    # A variant rendered for different lines is stale: drop it and its file.
+    for name in ("vocals", "backgrounds"):
+        if name == mode or ready(name):
+            continue
+        variants.pop(name, None)
+        _scrapbook_mix_path(book_dir, name == "backgrounds").unlink(missing_ok=True)
 
     render = {
         "signature": signature,
         "audio": f"/sessions/{sanitize_id(session_id)}/scrapbooks/{sid}/audio",
         "timeline": timeline,
         "gaps": gaps,
-        "rendered_at": _now(),
+        "rendered_at": now,
+        "variants": variants,
     }
     # Merge into the *current* file: an edit may have landed while we rendered,
     # and its lines must not be overwritten by our older snapshot.
@@ -1570,7 +1608,7 @@ def _render_scrapbook(session_id: str, meta: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(current, dict):
         current = meta
     current["render"] = render
-    current["updated_at"] = _now()
+    current["updated_at"] = now
     _write_json(meta_path, current)
     return render
 
@@ -1657,18 +1695,26 @@ def delete_scrapbook(session_id: str, scrapbook_id: str) -> dict[str, Any]:
 
 
 @app.post("/sessions/{session_id}/scrapbooks/{scrapbook_id}/render")
-def render_scrapbook(session_id: str, scrapbook_id: str) -> dict[str, Any]:
-    """Render (or return the cached) tempo-matched mix for a scrapbook."""
+def render_scrapbook(
+    session_id: str, scrapbook_id: str, backgrounds: bool = Query(False)
+) -> dict[str, Any]:
+    """Render (or return the cached) tempo-matched mix for a scrapbook.
+
+    ``backgrounds`` cuts each line from its raw recording (keeping the backing)
+    instead of the isolated vocal stem; both variants are cached separately.
+    """
     meta = _load_scrapbook(session_id, scrapbook_id)
-    return _render_scrapbook(session_id, meta)
+    return _render_scrapbook(session_id, meta, backgrounds=backgrounds)
 
 
 @app.get("/sessions/{session_id}/scrapbooks/{scrapbook_id}/audio")
-def get_scrapbook_audio(session_id: str, scrapbook_id: str) -> FileResponse:
-    """Stream a scrapbook's rendered mix."""
+def get_scrapbook_audio(
+    session_id: str, scrapbook_id: str, backgrounds: bool = Query(False)
+) -> FileResponse:
+    """Stream a scrapbook's rendered mix (vocals only, or with backgrounds)."""
     meta = _load_scrapbook(session_id, scrapbook_id)
     sid = str(meta["scrapbook_id"])
-    mix = _scrapbook_dir(session_id, sid) / "mix.m4a"
+    mix = _scrapbook_mix_path(_scrapbook_dir(session_id, sid), backgrounds)
     if not mix.is_file():
         raise HTTPException(status_code=404, detail="Scrapbook has not been rendered.")
     return FileResponse(mix, media_type="audio/mp4", filename=f"{sid}.m4a")

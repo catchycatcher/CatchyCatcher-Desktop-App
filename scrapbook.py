@@ -374,8 +374,27 @@ def _run(command: list[str]) -> None:
     subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def mix_filename(backgrounds: bool = False) -> str:
+    """The mix file: vocals-only, or with the source recordings' backgrounds."""
+    return "mix_bg.m4a" if backgrounds else "mix.m4a"
+
+
+def _source(entry: dict[str, Any], backgrounds: bool) -> str | Path:
+    """The audio a line is cut from: the raw recording, or the isolated vocals.
+
+    With ``backgrounds`` the raw input is used, so each stitched line keeps the
+    backing it was recorded over; otherwise the isolated vocal stem is used.
+    Falls back to the vocals when no raw recording is available.
+    """
+    if backgrounds:
+        return entry.get("original") or entry["vocals"]
+    return entry["vocals"]
+
+
 def render(
-    entries: list[dict[str, Any]], output_dir: str | Path
+    entries: list[dict[str, Any]],
+    output_dir: str | Path,
+    backgrounds: bool = False,
 ) -> tuple[list[dict[str, Any]], list[float], Path]:
     """Render the whole scrapbook into ``<output_dir>/mix.m4a``.
 
@@ -383,6 +402,10 @@ def render(
     the first line and preceded the second in their own recordings (their
     ``gap_after`` / ``gap_before`` stretches), cross-faded together — never
     running into the neighbouring line of either source take.
+
+    With ``backgrounds`` each line (and its surrounding gap) is cut from the raw
+    recording instead of the isolated vocal stem, so the mix keeps the backing.
+    The result is written to :func:`mix_filename` for that mode.
 
     Returns the timeline, the gaps, and the path to the written mix. Raises
     ``ValueError`` when there is nothing to render.
@@ -405,7 +428,11 @@ def render(
         speed = speeds[index]
         duration = max(0.0, float(entry["end"]) - float(entry["start"]))
         line_path = work / f"line_{index:04d}.wav"
-        _run(extract_command(entry["vocals"], float(entry["start"]), duration, speed, line_path))
+        _run(
+            extract_command(
+                _source(entry, backgrounds), float(entry["start"]), duration, speed, line_path
+            )
+        )
         parts.append(line_path)
 
         if index < len(gaps) and gaps[index] > 0.001:
@@ -418,7 +445,11 @@ def render(
                 earlier_path = work / f"gap_{index:04d}_a.wav"
                 _run(
                     extract_command(
-                        entry["vocals"], float(entry["end"]), float(gap_after), speed, earlier_path
+                        _source(entry, backgrounds),
+                        float(entry["end"]),
+                        float(gap_after),
+                        speed,
+                        earlier_path,
                     )
                 )
                 read = _read_wav(earlier_path)
@@ -430,7 +461,7 @@ def render(
                 later_path = work / f"gap_{index:04d}_b.wav"
                 _run(
                     extract_command(
-                        following["vocals"],
+                        _source(following, backgrounds),
                         float(following["start"]) - float(gap_before),
                         float(gap_before),
                         speeds[index + 1],
@@ -450,6 +481,6 @@ def render(
     list_file = work / "concat.txt"
     list_file.write_text("".join(f"file '{part.name}'\n" for part in parts), encoding="utf-8")
 
-    mix = out_dir / "mix.m4a"
+    mix = out_dir / mix_filename(backgrounds)
     _run(concat_command(list_file, mix))
     return timeline, gaps, mix

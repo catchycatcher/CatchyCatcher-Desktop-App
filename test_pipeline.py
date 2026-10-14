@@ -1383,11 +1383,11 @@ class ApiTests(unittest.TestCase):
         # Another session does not see it.
         self.assertEqual(self.client.get("/sessions/other/scrapbooks").json()["scrapbooks"], [])
 
-        def fake_render(entries, output_dir):
+        def fake_render(entries, output_dir, backgrounds=False):
             path = Path(output_dir)
             path.mkdir(parents=True, exist_ok=True)
-            mix = path / "mix.m4a"
-            mix.write_bytes(b"MIX")
+            mix = path / scrapbook.mix_filename(backgrounds)
+            mix.write_bytes(b"MIX-BG" if backgrounds else b"MIX")
             timeline = [{"bpm": 120.0, "start time": 0.0, "end time": 1.0, "words": []}]
             return timeline, [], mix
 
@@ -1397,6 +1397,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(rendered.json()["audio"], f"/sessions/src/scrapbooks/{sid}/audio")
         self.assertEqual(len(rendered.json()["timeline"]), 1)
         self.assertEqual(render.call_count, 1)
+        self.assertIn("vocals", rendered.json()["variants"])
 
         # A second render is served from cache (the signature is unchanged).
         with mock.patch.object(server.scrapbook, "render", side_effect=fake_render) as render2:
@@ -1404,9 +1405,22 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(again.status_code, 200)
         render2.assert_not_called()
 
+        # The backgrounds variant renders separately, keeping the vocals one.
+        with mock.patch.object(server.scrapbook, "render", side_effect=fake_render) as render_bg:
+            mixed = self.client.post(f"/sessions/src/scrapbooks/{sid}/render?backgrounds=true")
+        self.assertEqual(mixed.status_code, 200, mixed.text)
+        self.assertEqual(render_bg.call_count, 1)
+        self.assertEqual(
+            sorted(mixed.json()["variants"]), ["backgrounds", "vocals"]
+        )
+
         audio = self.client.get(f"/sessions/src/scrapbooks/{sid}/audio")
         self.assertEqual(audio.status_code, 200)
         self.assertEqual(audio.content, b"MIX")
+
+        audio_bg = self.client.get(f"/sessions/src/scrapbooks/{sid}/audio?backgrounds=true")
+        self.assertEqual(audio_bg.status_code, 200)
+        self.assertEqual(audio_bg.content, b"MIX-BG")
 
         updated = self.client.patch(f"/sessions/src/scrapbooks/{sid}", json={"lines": []})
         self.assertEqual(updated.status_code, 200, updated.text)
